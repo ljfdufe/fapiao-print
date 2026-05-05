@@ -321,9 +321,9 @@ fn build_svg_text(
         "宋体" | "SimSun" | "STSong" => "宋体, SimSun, STSong, serif".to_string(),
         "黑体" | "SimHei" | "STHeiti" => "黑体, SimHei, STHeiti, sans-serif".to_string(),
         "仿宋" | "FangSong" | "STFangsong" => "仿宋, FangSong, STFangsong, serif".to_string(),
-        "Courier New" => "'Courier New', Courier, monospace".to_string(),
+        "Courier New" | "CourierNewPSMT" => "'Courier New', Courier, monospace".to_string(),
         "Times New Roman" => "'Times New Roman', Times, serif".to_string(),
-        other => other.to_string(),
+        other => format!("{}, SimSun, 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif", other),
     };
 
     let font_size = text_obj.size;
@@ -1302,8 +1302,8 @@ fn build_svg_image(img: &OfdImageObject, image_data: &HashMap<u32, String>, scal
     let opacity = img.alpha.map(|a| format!(" opacity=\"{:.2}\"", a as f64 / 255.0)).unwrap_or_default();
 
     format!(
-        "<image href=\"{}\" x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\"{}/>",
-        data_url, x, y, w, h, opacity
+        "<image xlink:href=\"{}\" href=\"{}\" x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\" preserveAspectRatio=\"none\"{}/>",
+        data_url, data_url, x, y, w, h, opacity
     )
 }
 

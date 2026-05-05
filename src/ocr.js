@@ -261,6 +261,18 @@ function applyOcrResult(fileObj, ocrResult) {
       info = extractByCoordinates(ocrResult);
     }
 
+    // --- 后置校验：金额求和验证（含税价 ≈ 不含税 + 税额）---
+    if (info.amountTax > 0 && info.amountNoTax > 0) {
+      var _sum = Math.round((info.amountNoTax + info.taxAmount) * 100) / 100;
+      if (Math.abs(_sum - info.amountTax) > 0.02) {
+        console.warn('[验证] 金额求和校验失败: 含税=' + info.amountTax +
+          ', 不含税=' + info.amountNoTax + ', 税额=' + info.taxAmount +
+          ', 验证=' + info.amountNoTax + '+' + info.taxAmount + '=' + _sum);
+        // 清零，让后续逻辑拒绝错误值
+        info.amountTax = 0; info.amountNoTax = 0; info.taxAmount = 0;
+      }
+    }
+
     // Always set _ocrText for display — this is the main purpose of running OCR on all pages
     fileObj._ocrText = info._ocrText || ocrResult.text || '';
     fileObj._isTicket = info.isTicket || false;
