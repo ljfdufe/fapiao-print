@@ -699,12 +699,13 @@ function updateFileItem(fileObj) {
   var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
   var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
   var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
-  var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || '') + '">' + escHtml(f.sellerName.length > 16 ? f.sellerName.substring(0, 16) + '\u2026' : f.sellerName) + '</span>' : '';
+  var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
   var metaEl = items[idx].querySelector('.file-meta');
   var sellerEl = items[idx].querySelector('.file-seller');
   if (metaEl) metaEl.innerHTML = fmtSize(f.size) + cb + rb + ab;
   if (sellerEl) {
     sellerEl.innerHTML = sb;
+    sellerEl.title = f.sellerName || '';
     sellerEl.style.display = sb ? '' : 'none';
   }
   // Update per-file OCR button state
@@ -977,7 +978,7 @@ function renderFileList() {
     var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
     var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
     var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
-    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || '') + '">' + escHtml(f.sellerName.length > 16 ? f.sellerName.substring(0, 16) + '\u2026' : f.sellerName) + '</span>' : '';
+    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
     // XSS FIX: escHtml(f.name) in both title and display text
     // XSS FIX: escHtml(f.previewUrl) in img src, escHtml(f.type) in type-badge
     var safePreviewUrl = escHtml(f.previewUrl || '');
@@ -999,7 +1000,7 @@ function renderFileList() {
     return '<div class="' + cls + '" data-idx="' + i + '" onclick="clickFileItem(' + i + ',event)" ondblclick="openInvModal(' + i + ')">' +
       '<div class="file-check ' + (f.checked ? 'checked' : '') + '" onclick="togCheck(' + i + ')"></div>' +
       '<div class="file-thumb">' + thumbContent + '<div class="type-badge">' + safeType + '</div></div>' +
-      '<div class="file-info"><div class="file-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' + (sb ? '<div class="file-seller">' + sb + '</div>' : '') + '<div class="file-meta">' + metaActions + '</div></div>' +
+      '<div class="file-info"><div class="file-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' + (sb ? '<div class="file-seller" title="' + escHtml(f.sellerName) + '">' + sb + '</div>' : '') + '<div class="file-meta">' + metaActions + '</div></div>' +
     '</div>';
   }).join('');
 
