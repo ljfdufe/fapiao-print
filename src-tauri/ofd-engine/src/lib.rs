@@ -1266,14 +1266,21 @@ fn build_svg_path(p: &OfdPathObject, scale: f64) -> String {
     if p.fill {
         attrs.push_str(" fill-rule=\"nonzero\"");
     }
-    attrs.push_str(&stroke_attr(p.stroke_color, p.alpha));
+    // When fill=true with NO fill_color AND NO stroke_color: default to black (OFD spec).
+    // When fill=true with explicit stroke_color but no fill_color: keep fill="none" so
+    // internal strokes like the ¥ cross remain visible through the unfilled shape.
+    let eff_stroke = p.stroke_color.or_else(|| if p.fill && p.stroke_color.is_none() { Some((0, 0, 0)) } else { None });
+    attrs.push_str(&stroke_attr(eff_stroke, p.alpha));
     if p.fill {
         if let Some(fc) = p.fill_color {
             attrs.push_str(&fill_attr(Some(fc), p.alpha));
-        } else {
-            // fill=true but no explicit fill_color: don't fall back to stroke_color
-            // (that would fill the shape solid and hide internal strokes like the ¥ cross)
+        } else if p.stroke_color.is_some() {
+            // fill=true but no explicit fill_color with explicit stroke_color:
+            // don't fill — would hide internal strokes like the ¥ cross
             attrs.push_str(" fill=\"none\"");
+        } else {
+            // fill=true with NO fill_color AND NO stroke_color: default black
+            attrs.push_str(&fill_attr(Some((0, 0, 0)), p.alpha));
         }
     } else {
         attrs.push_str(" fill=\"none\"");
