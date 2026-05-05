@@ -1260,21 +1260,21 @@ fn build_svg_path(p: &OfdPathObject, scale: f64) -> String {
     let tx = p.boundary.0 * scale;
     let ty = p.boundary.1 * scale;
 
-    // Default: when fill=true but no explicit fill color, use black (OFD spec default)
-    let effective_fill = p.fill_color.or_else(|| if p.fill { Some((0, 0, 0)) } else { None });
-    // Default: when no explicit stroke color but path is meant to be filled (e.g. stamp),
-    // use black stroke so both fill and outline are visible
-    let effective_stroke = p.stroke_color.or_else(|| if p.fill { Some((0, 0, 0)) } else { None });
-
     let mut attrs = String::new();
     attrs.push_str(&format!(" transform=\"translate({:.4},{:.4}) scale({:.4})\"", tx, ty, scale));
     attrs.push_str(&format!(" stroke-width=\"{:.4}\"", p.line_width));
     if p.fill {
         attrs.push_str(" fill-rule=\"nonzero\"");
     }
-    attrs.push_str(&stroke_attr(effective_stroke, p.alpha));
+    attrs.push_str(&stroke_attr(p.stroke_color, p.alpha));
     if p.fill {
-        attrs.push_str(&fill_attr(effective_fill, p.alpha));
+        if let Some(fc) = p.fill_color {
+            attrs.push_str(&fill_attr(Some(fc), p.alpha));
+        } else {
+            // fill=true but no explicit fill_color: don't fall back to stroke_color
+            // (that would fill the shape solid and hide internal strokes like the ¥ cross)
+            attrs.push_str(" fill=\"none\"");
+        }
     } else {
         attrs.push_str(" fill=\"none\"");
     }
