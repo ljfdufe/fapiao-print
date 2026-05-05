@@ -140,6 +140,7 @@ struct OfdImageObject {
     ctm: Option<(f64, f64, f64, f64, f64, f64)>,
     blend_mode: Option<String>,
     alpha: Option<u8>,
+    image_mask: Option<u32>, // ResourceID of mask image (OFD ImageMask attribute)
 }
 
 // =====================================================
@@ -662,6 +663,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "CTM") { img.ctm = parse_f6(&v); }
                         if let Some(v) = attr_val(&e, "BlendMode") { img.blend_mode = Some(v); }
                         if let Some(v) = attr_val(&e, "Alpha") { img.alpha = v.parse().ok(); }
+                        if let Some(v) = attr_val(&e, "ImageMask") { img.image_mask = v.parse().ok(); }
                         current_img = Some(img);
                     }
                     "TextCode" => {
@@ -747,6 +749,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "ResourceID") { img.resource_id = v.parse().unwrap_or(0); }
                         if let Some(v) = attr_val(&e, "CTM") { img.ctm = parse_f6(&v); }
                         if let Some(v) = attr_val(&e, "Alpha") { img.alpha = v.parse().ok(); }
+                        if let Some(v) = attr_val(&e, "ImageMask") { img.image_mask = v.parse().ok(); }
                         img_objs.push(img);
                     }
                     "StrokeColor" => {
@@ -1860,14 +1863,15 @@ pub fn parse_ofd_file(ofd_path: &str) -> Result<OfdResult, String> {
         HashMap::new()
     };
 
-    // Load actual image data from ZIP
-    let mut image_data: HashMap<u32, String> = HashMap::new();
+    // Load actual image raw bytes from ZIP (data URL generation deferred until after content parsing
+    // so we can apply ImageMask from parsed ImageObjects)
+    let mut image_raw_bytes: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut image_file_names: HashMap<u32, String> = HashMap::new();
     for (res_id, file_name) in &image_map {
         let img_path = format!("{}/Res/{}", base_dir, file_name);
         if let Some(bytes) = zip_read_bytes(&mut archive, &img_path) {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let mime = if file_name.to_lowercase().ends_with(".png") { "image/png" } else { "image/jpeg" };
-            image_data.insert(*res_id, format!("data:{};base64,{}", mime, b64));
+            image_raw_bytes.insert(*res_id, bytes);
+            image_file_names.insert(*res_id, file_name.clone());
         }
     }
 
@@ -1905,6 +1909,68 @@ pub fn parse_ofd_file(ofd_path: &str) -> Result<OfdResult, String> {
     } else {
         (Vec::new(), Vec::new())
     };
+
+    // 5b. Generate image data URLs, applying ImageMask compositing where needed
+    // Collect all ImageObjects with ImageMask from template + page + annotations
+    let mut mask_map: HashMap<u32, u32> = HashMap::new(); // resource_id → mask_resource_id
+    {
+        let collect_masks = |imgs: &[OfdImageObject], map: &mut HashMap<u32, u32>| {
+            for img in imgs {
+                if let Some(mask_id) = img.image_mask {
+                    map.insert(img.resource_id, mask_id);
+                }
+            }
+        };
+        collect_masks(&tpl_imgs, &mut mask_map);
+        collect_masks(&page_imgs, &mut mask_map);
+        collect_masks(&annot_imgs, &mut mask_map);
+    }
+
+    let mut image_data: HashMap<u32, String> = HashMap::new();
+    for (res_id, bytes) in &image_raw_bytes {
+        if let Some(&mask_res_id) = mask_map.get(res_id) {
+            // Composite: decode main image + mask, merge alpha channel, encode as RGBA PNG
+            if let Some(mask_bytes) = image_raw_bytes.get(&mask_res_id) {
+                if let Ok(main_img) = image::load_from_memory(bytes) {
+                    if let Ok(mask_img) = image::load_from_memory(mask_bytes) {
+                        let main_rgba = main_img.to_rgba8();
+                        let mask_rgba = mask_img.to_rgba8();
+                        // Both images must match dimensions
+                        if main_rgba.width() == mask_rgba.width() && main_rgba.height() == mask_rgba.height() {
+                            let mut composited = main_rgba.clone();
+                            for (pixel, mask_pixel) in composited.pixels_mut().zip(mask_rgba.pixels()) {
+                                // Mask: white (255) = opaque, black (0) = transparent
+                                // Use the red channel of the mask as alpha
+                                pixel[3] = mask_pixel[0];
+                            }
+                            let mut png_buf = Vec::new();
+                            use std::io::Cursor;
+                            if composited.write_to(&mut Cursor::new(&mut png_buf), image::ImageFormat::Png).is_ok() {
+                                let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+                                image_data.insert(*res_id, format!("data:image/png;base64,{}", b64));
+                                log::info!("ImageMask applied: resource {} masked by {}", res_id, mask_res_id);
+                                continue;
+                            }
+                        } else {
+                            log::warn!("ImageMask dimension mismatch: main={}x{}, mask={}x{}, skipping mask",
+                                main_rgba.width(), main_rgba.height(), mask_rgba.width(), mask_rgba.height());
+                        }
+                    }
+                }
+            }
+            // Fallback: if mask compositing failed, use the main image as-is
+            log::warn!("ImageMask compositing failed for resource {}, using unmasked image", res_id);
+        }
+        // Default: encode as-is
+        let file_name = image_file_names.get(res_id).map(|s| s.as_str()).unwrap_or("");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mime = if file_name.to_lowercase().ends_with(".png") || file_name.to_lowercase().ends_with(".bmp") {
+            "image/png" // BMP decoded → re-encode as PNG for browser compatibility
+        } else {
+            "image/jpeg"
+        };
+        image_data.insert(*res_id, format!("data:{};base64,{}", mime, b64));
+    }
 
     // 9. Get page dimensions
     let (page_w, page_h) = if let Some(page_path) = page_paths.first() {

@@ -1,5 +1,18 @@
 # 📋 更新日志
 
+## v1.9.3 — OFD ImageMask 遮罩兼容
+
+### 🐛 修复
+
+- **OFD ImageMask 遮罩不生效**：iloveofd 等二次转换工具生成的 OFD 文件，红章图片使用 `ImageMask` 属性引用 BMP 遮罩图（0=透明，255=不透明）。此前引擎未解析该属性，导致遮罩不生效、BMP 黑色区域变成图片黑色背景。现已在解析阶段提取 ImageMask，图片加载时将遮罩合成为主图 alpha 通道，输出 RGBA PNG
+- **BMP 图片格式支持**：`image` crate 新增 `bmp` feature，可解码 BMP 遮罩图；BMP 文件统一以 PNG 格式输出（浏览器不原生支持 BMP data URL）
+
+### 📝 说明
+
+- 不同厂商/转换工具生成的 OFD 发票格式存在差异（如税务原版 OFD、iloveofd 转换、dzcp 公共服务平台等），如遇解析渲染问题请及时反馈，我们会持续适配
+
+---
+
 ## v1.9.2 — OFD 发票字段提取修复
 
 ### 🐛 修复
