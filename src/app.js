@@ -1357,7 +1357,7 @@ function quickLayout(c, r) {
   document.getElementById('customCols').value = c;
 }
 function toggleFeature(k, btn) {
-  S.feat[k] = !S.feat[k];
+  if (k === 'pageNum' || k === 'printDate') return; // 功能暂未就绪，禁止开启
   btn.classList.toggle('on', S.feat[k]);
   if (k === 'watermark') document.getElementById('wmOpts').style.display = S.feat[k] ? 'block' : 'none';
   if (k === 'trimWhite' && S.feat[k]) processTrim();

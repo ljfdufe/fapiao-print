@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+use ab_glyph::{Font as AbFont, Glyph, ScaleFont};
 
 /// Rendering DPI — must match frontend PDF_RENDER_DPI constant
 pub const RENDER_DPI: u32 = 300;
@@ -1679,7 +1680,8 @@ pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> image::Dyna
 // =====================================================
 
 /// Settings for layout rendering — mirrors JS getSettings() output.
-/// Fields used only for deserialization from JS (border/number/watermark rendered in preview only)
+/// Fields used only for deserialization from JS (border/number/watermark rendered in preview only);
+/// page_num and print_date are also rendered into the PDF as text overlay images.
 /// are allowed to be dead code since they're needed for serde but not used in Rust PDF generation.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1701,6 +1703,8 @@ pub struct RenderSettings {
     pub color_mode: String,
     pub border: bool,
     pub number: bool,
+    pub page_num: bool,
+    pub print_date: bool,
     pub cutline: bool,
     pub watermark: bool,
     pub watermark_text: Option<String>,
@@ -1821,6 +1825,145 @@ fn calculate_layout_mm(settings: &RenderSettings) -> (Vec<LayoutSlotMm>, f32, f3
     }
 
     (slots, pw, ph)
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+/// Simple algorithm, no need for chrono dependency.
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    // Shift to days since 0000-03-01 (simplifies leap year calculation)
+    let z = days + 719468;
+    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+/// Load SimHei font from system fonts directory.
+/// Returns FontArc if successful, logs error and returns None if not.
+fn load_system_font() -> Option<ab_glyph::FontArc> {
+    let font_data = match std::fs::read("C:\\Windows\\Fonts\\simhei.ttf") {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("load_system_font: failed to read simhei.ttf: {}", e);
+            return None;
+        }
+    };
+    match ab_glyph::FontArc::try_from_vec(font_data) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log::error!("load_system_font: failed to parse simhei.ttf: {}", e);
+            None
+        }
+    }
+}
+
+/// Render page number and/or print date text to a RGBA image with transparency.
+/// Returns (png_bytes, width_px, height_px) or None if neither is enabled.
+///
+/// The image is rendered at RENDER_DPI for high-quality PDF output.
+/// Uses ab_glyph to rasterize text with a system CJK font.
+fn render_text_overlay(
+    font: &Option<ab_glyph::FontArc>,
+    page_num_text: &str,
+    print_date_text: &str,
+    page_width_mm: f32,
+    _total_pages: usize,
+) -> Option<(Vec<u8>, u32, u32)> {
+    if page_num_text.is_empty() && print_date_text.is_empty() {
+        return None;
+    }
+
+    let font = match font {
+        Some(f) => f,
+        None => {
+            log::warn!("render_text_overlay: no font available, skipping");
+            return None;
+        }
+    };
+
+    // Render at RENDER_DPI for print quality
+    let px_per_mm = RENDER_DPI as f32 / 25.4;
+    let img_width = (page_width_mm * px_per_mm) as u32;
+    let font_size = (3.5 * px_per_mm) as f32; // ~3.5mm text height ≈ 10pt at screen
+    let line_height = font_size * 1.4;
+    let num_lines = if !page_num_text.is_empty() && !print_date_text.is_empty() { 2 } else { 1 };
+    let img_height = (line_height * num_lines as f32 * 1.5) as u32;
+
+    // Create RGBA image (transparent background)
+    let mut img = image::RgbaImage::new(img_width, img_height);
+
+    // Text color: #94a3b8 (matches preview) at full opacity
+    let text_color = [148u8, 163u8, 184u8, 255u8];
+
+    let scaled_font = font.as_scaled(font_size);
+
+    let mut y_offset = font_size; // Start at baseline of first line
+
+    // Helper: render a line of text centered horizontally
+    let render_line = |img: &mut image::RgbaImage, text: &str, y_baseline: f32, sf: &ab_glyph::PxScaleFont<&ab_glyph::FontArc>| {
+        let text_width: f32 = text.chars()
+            .map(|c| sf.h_advance(font.glyph_id(c)))
+            .sum();
+        let x_start = (img.width() as f32 - text_width) / 2.0;
+
+        let mut x = x_start;
+        for c in text.chars() {
+            let glyph_id = font.glyph_id(c);
+            let glyph = Glyph {
+                id: glyph_id,
+                scale: font_size.into(),
+                position: ab_glyph::point(x, y_baseline),
+            };
+            if let Some(q) = font.outline_glyph(glyph) {
+                let bb = q.px_bounds();
+                let x_draw = bb.min.x;
+                let y_draw = bb.min.y;
+                q.draw(|gx, gy, v| {
+                    let px = (x_draw + gx as f32) as i32;
+                    let py = (y_draw + gy as f32) as i32;
+                    if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                        let alpha = (v * text_color[3] as f32) as u8;
+                        let pixel = img.get_pixel_mut(px as u32, py as u32);
+                        if alpha > pixel[3] {
+                            *pixel = image::Rgba([text_color[0], text_color[1], text_color[2], alpha]);
+                        }
+                    }
+                });
+            }
+            x += sf.h_advance(glyph_id);
+        }
+    };
+
+    // Render page number (centered)
+    if !page_num_text.is_empty() {
+        render_line(&mut img, page_num_text, y_offset, &scaled_font);
+        y_offset += line_height;
+    }
+
+    // Render print date (centered)
+    if !print_date_text.is_empty() {
+        render_line(&mut img, print_date_text, y_offset, &scaled_font);
+    }
+
+    // Encode as PNG
+    let mut png_buf = Vec::new();
+    match img.write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png) {
+        Ok(()) => {
+            log::info!("render_text_overlay: generated {}x{} PNG ({} bytes) for '{}' + '{}'",
+                img_width, img_height, png_buf.len(), page_num_text, print_date_text);
+            Some((png_buf, img_width, img_height))
+        }
+        Err(e) => {
+            log::error!("render_text_overlay: PNG encode failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Apply grayscale or B&W conversion to an image.
@@ -2261,12 +2404,19 @@ pub fn generate_pdf_from_layout(
     // Step 2: Build pages, caching XObjects by (file_index, rotation) to avoid redundant work.
     let mut xobj_cache: std::collections::HashMap<(usize, i32), CachedXobj> = std::collections::HashMap::new();
 
+    // Pre-load CJK font for text overlay
+    let text_font = if request.settings.page_num || request.settings.print_date {
+        load_system_font()
+    } else {
+        None
+    };
+
     for (i, page_spec) in request.pages.iter().enumerate() {
         // Check shutdown flag — abort PDF generation if app is closing
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return Err("应用正在关闭，PDF生成已中止".to_string());
         }
-        let ops = build_page_ops(
+        let mut ops = build_page_ops(
             &mut doc,
             page_spec,
             &request.settings,
@@ -2274,6 +2424,61 @@ pub fn generate_pdf_from_layout(
             &sources,
             &mut xobj_cache,
         );
+
+        // Add text overlay (page number + print date) for printpdf fallback path
+        let pp_page_num_text = if request.settings.page_num {
+            format!("第 {} 页 / 共 {} 页", i + 1, request.pages.len())
+        } else {
+            String::new()
+        };
+        let pp_print_date_text = if request.settings.print_date {
+            let now = std::time::SystemTime::now();
+            let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let (year, month, day) = days_to_ymd((duration.as_secs() / 86400) as i64);
+            format!("打印日期 {:04}-{:02}-{:02}", year, month, day)
+        } else {
+            String::new()
+        };
+        if let Some((png_bytes, _img_w, _img_h)) = render_text_overlay(
+            &text_font, &pp_page_num_text, &pp_print_date_text, pw, request.pages.len()
+        ) {
+            let mut warnings = Vec::new();
+            match printpdf::RawImage::decode_from_bytes(&png_bytes, &mut warnings) {
+                Ok(raw_img) => {
+                    let img_w = raw_img.width as f32;
+                    let img_h = raw_img.height as f32;
+                    let xobj_id = doc.add_image(&raw_img);
+
+                    // Position: bottom-center, 5mm from bottom
+                    // RawImage dimensions are in pixels; scale from RENDER_DPI to PDF pt
+                    let img_w_pt = img_w * 72.0 / RENDER_DPI as f32;
+                    let img_h_pt = img_h * 72.0 / RENDER_DPI as f32;
+                    let pw_pt = pw * MM_TO_PT;
+                    let x_pt = (pw_pt - img_w_pt) / 2.0;
+                    let y_pt = 5.0 * MM_TO_PT;
+
+                    ops.push(printpdf::Op::SaveGraphicsState);
+                    ops.push(printpdf::Op::UseXobject {
+                        id: xobj_id,
+                        transform: printpdf::XObjectTransform {
+                            translate_x: Some(printpdf::Pt(x_pt)),
+                            translate_y: Some(printpdf::Pt(y_pt)),
+                            scale_x: Some(img_w_pt),
+                            scale_y: Some(img_h_pt),
+                            dpi: Some(RENDER_DPI as f32),
+                            rotate: None,
+                        },
+                    });
+                    ops.push(printpdf::Op::RestoreGraphicsState);
+                    log::info!("printpdf fallback: page {} text overlay added", i);
+                }
+                Err(e) => {
+                    log::warn!("printpdf fallback: page {} text overlay RawImage decode failed: {}", i, e);
+                }
+            }
+        } else {
+            log::warn!("printpdf fallback: page {} render_text_overlay returned None", i);
+        }
 
         // Skip empty pages — avoid generating blank PDF pages when
         // all slots have no valid images (e.g. last page with fewer files)
@@ -3135,6 +3340,16 @@ fn generate_pdf_passthrough(
     let pages_id = output_doc.new_object_id();
     let mut all_page_ids: Vec<lopdf::ObjectId> = Vec::new();
 
+    // Pre-load CJK font for text overlay (only if page_num or print_date is enabled)
+    let text_font = if request.settings.page_num || request.settings.print_date {
+        load_system_font()
+    } else {
+        None
+    };
+    if text_font.is_none() && (request.settings.page_num || request.settings.print_date) {
+        log::warn!("lopdf hybrid: text overlay enabled but font load failed, overlay will be skipped");
+    }
+
     // Diagnostic: log all file specs
     for (i, f) in request.files.iter().enumerate() {
         log::info!("lopdf hybrid: file[{}] pdf_path={:?} source_type={:?} data_url_len={} file_path={:?}",
@@ -3241,9 +3456,115 @@ fn generate_pdf_passthrough(
         }
 
         // Build content stream for this output page
-        let content_bytes = build_nup_content_stream(
+        let mut content_bytes = build_nup_content_stream(
             &page_form_xobjs, &slot_positions, &request.settings, &slot_adjustments
         )?;
+
+        // Add text overlay (page number + print date) if enabled
+        let page_num_text = if request.settings.page_num {
+            format!("第 {} 页 / 共 {} 页", page_idx + 1, request.pages.len())
+        } else {
+            String::new()
+        };
+        let print_date_text = if request.settings.print_date {
+            let now = std::time::SystemTime::now();
+            let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let secs = duration.as_secs();
+            // Simple date calculation from unix timestamp
+            let days = secs / 86400;
+            // Calculate year/month/day from days since 1970-01-01
+            let (year, month, day) = days_to_ymd(days as i64);
+            format!("打印日期 {:04}-{:02}-{:02}", year, month, day)
+        } else {
+            String::new()
+        };
+
+        if let Some((png_bytes, _img_w, _img_h)) = render_text_overlay(
+            &text_font, &page_num_text, &print_date_text, pw, request.pages.len()
+        ) {
+            // Embed as Image XObject (RGBA PNG → decode to raw pixels, then encode as FlateDecode)
+            match image::load_from_memory(&png_bytes) {
+                Ok(rgba_img) => {
+                    let rgba_img = rgba_img.to_rgba8();
+                    let (w, h) = rgba_img.dimensions();
+
+                    // Extract alpha channel and create SMask for transparency
+                    let alpha_bytes: Vec<u8> = rgba_img.pixels().map(|p| p[3]).collect();
+                    let rgb_bytes: Vec<u8> = rgba_img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+
+                    // SMask (soft mask / alpha channel)
+                    use lopdf::Dictionary as LopdfDict;
+                    let smask_dict = LopdfDict::from_iter(vec![
+                        ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                        ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                        ("Width", lopdf::Object::Integer(w as i64)),
+                        ("Height", lopdf::Object::Integer(h as i64)),
+                        ("ColorSpace", lopdf::Object::Name(b"DeviceGray".to_vec())),
+                        ("BitsPerComponent", lopdf::Object::Integer(8)),
+                    ]);
+                    let smask_stream = lopdf::Stream::new(smask_dict, alpha_bytes).with_compression(true);
+                    let smask_id = output_doc.add_object(smask_stream);
+
+                    // RGB image with SMask reference
+                    let img_dict = LopdfDict::from_iter(vec![
+                        ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                        ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                        ("Width", lopdf::Object::Integer(w as i64)),
+                        ("Height", lopdf::Object::Integer(h as i64)),
+                        ("ColorSpace", lopdf::Object::Name(b"DeviceRGB".to_vec())),
+                        ("BitsPerComponent", lopdf::Object::Integer(8)),
+                        ("SMask", lopdf::Object::Reference(smask_id)),
+                    ]);
+                    let img_stream = lopdf::Stream::new(img_dict, rgb_bytes).with_compression(true);
+                    let text_xobj_id = output_doc.add_object(img_stream);
+
+                    // Calculate position: bottom-center of page
+                    let img_w_pt = w as f32 * 72.0 / RENDER_DPI as f32;
+                    let img_h_pt = h as f32 * 72.0 / RENDER_DPI as f32;
+                    let x_pt = (pw_pt - img_w_pt) / 2.0; // centered horizontally
+                    let y_pt = 5.0 * MM_TO_PT; // 5mm from bottom edge
+
+                    // Append to content stream: save state, position, draw image, restore state
+                    use lopdf::content::Operation;
+                    let name = b"TxtOverlay".to_vec();
+                    let mut text_ops = Vec::new();
+                    text_ops.push(Operation { operator: "q".into(), operands: vec![] });
+                    text_ops.push(Operation { operator: "cm".into(), operands: vec![
+                        lopdf::Object::Real(img_w_pt),
+                        lopdf::Object::Real(0.0),
+                        lopdf::Object::Real(0.0),
+                        lopdf::Object::Real(img_h_pt),
+                        lopdf::Object::Real(x_pt),
+                        lopdf::Object::Real(y_pt),
+                    ]});
+                    text_ops.push(Operation { operator: "Do".into(), operands: vec![
+                        lopdf::Object::Name(name.clone()),
+                    ]});
+                    text_ops.push(Operation { operator: "Q".into(), operands: vec![] });
+
+                    let text_content = lopdf::content::Content { operations: text_ops };
+                    if let Ok(text_bytes) = text_content.encode() {
+                        // Add separator newline before text overlay ops to avoid
+                        // merging with the last operation of the main content stream
+                        // (e.g. "Qq" would be an invalid token)
+                        if !content_bytes.is_empty() {
+                            content_bytes.push(b'\n');
+                        }
+                        content_bytes.extend_from_slice(&text_bytes);
+                        xobj_names.push((name, text_xobj_id));
+                        log::info!("lopdf hybrid: page {} text overlay added ({}x{} at x={:.1} y={:.1})",
+                            page_idx, w, h, x_pt, y_pt);
+                    } else {
+                        log::warn!("lopdf hybrid: page {} text overlay content encode failed", page_idx);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("lopdf hybrid: page {} text overlay PNG decode failed: {}", page_idx, e);
+                }
+            }
+        } else {
+            log::warn!("lopdf hybrid: page {} render_text_overlay returned None", page_idx);
+        }
 
         // Create the content stream object
         let content_id = output_doc.add_object(lopdf::Stream::new(

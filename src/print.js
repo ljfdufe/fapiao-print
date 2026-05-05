@@ -304,7 +304,7 @@ function fallbackPrint(files, s) {
   var pages = buildPages(files, s);
   var expanded = s.collate ? Array(s.copies).fill(pages).flat() : pages.flatMap(function(p) { return Array(s.copies).fill(p); });
   var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>发票打印</title><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:' + s.paperW + 'mm ' + s.paperH + 'mm;margin:0}body{background:white}.page{width:' + s.paperW + 'mm;height:' + s.paperH + 'mm;position:relative;page-break-after:always;background:white;overflow:hidden}.slot{position:absolute;overflow:hidden;display:flex;align-items:center;justify-content:center}.slot img{max-width:100%;max-height:100%;object-fit:contain}</style></head><body>';
-  expanded.forEach(function(page) {
+  expanded.forEach(function(page, pi) {
     html += '<div class="page">';
     var mt = s.marginTop, mb = s.marginBottom, ml = s.marginLeft, mr = s.marginRight;
     var slotW = (s.paperW - s.cols * (ml + mr) - (s.cols - 1) * s.gapH) / s.cols;
@@ -340,6 +340,14 @@ function fallbackPrint(files, s) {
         var transformStyle = transforms ? 'transform:' + transforms + ';' : '';
         html += '<div class="slot" style="left:' + x + 'mm;top:' + y + 'mm;width:' + slotW + 'mm;height:' + slotH + 'mm"><img src="' + escHtml(src) + '" style="' + sizeStyle + transformStyle + '"></div>';
       }
+    }
+    // Page number and print date (per-page, same as preview)
+    if (s.pageNum) html += '<div style="position:absolute;bottom:5mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">第 ' + (pi + 1) + ' 页 / 共 ' + expanded.length + ' 页</div>';
+    if (s.printDate) {
+      var now = new Date();
+      var dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+      var dateStyle = s.pageNum ? 'position:absolute;bottom:5mm;right:10mm;font-size:10px;color:#94a3b8' : 'position:absolute;bottom:5mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8';
+      html += '<div style="' + dateStyle + '">打印日期 ' + dateStr + '</div>';
     }
     html += '</div>';
   });

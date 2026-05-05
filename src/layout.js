@@ -161,6 +161,13 @@ function renderPage(pageFiles, pi, total, s) {
   }
 
   if (s.pageNum) html += '<div style="position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">第 ' + (pi + 1) + ' 页 / 共 ' + total + ' 页</div>';
+  if (s.printDate) {
+    var now = new Date();
+    var dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    // If pageNum is also shown, put date on the right; otherwise center it
+    var dateStyle = s.pageNum ? 'position:absolute;bottom:5px;right:10px;font-size:10px;color:#94a3b8' : 'position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8';
+    html += '<div style="' + dateStyle + '">打印日期 ' + dateStr + '</div>';
+  }
 
   document.getElementById('previewPages').style.display = 'block';
   document.getElementById('emptyState').style.display = 'none';
