@@ -94,6 +94,7 @@ struct OfdTextObject {
     alpha: Option<u8>,
     blend_mode: Option<String>,
     weight: u32, // OFD font weight: 400=normal, 700=bold
+    layer_draw_param: Option<u32>, // DrawParam ID from the Layer this object belongs to
 }
 
 impl Default for OfdTextObject {
@@ -113,6 +114,7 @@ impl Default for OfdTextObject {
             alpha: None,
             blend_mode: None,
             weight: 400, // Normal weight by default
+            layer_draw_param: None,
         }
     }
 }
@@ -127,6 +129,7 @@ struct OfdPathObject {
     fill: bool,
     abbreviated_data: String,
     alpha: Option<u8>,
+    layer_draw_param: Option<u32>, // DrawParam ID from the Layer this object belongs to
 }
 
 #[derive(Debug, Default)]
@@ -297,6 +300,36 @@ fn parse_delta_x(s: &str) -> Vec<f64> {
 // SVG Generation Helpers
 // =====================================================
 
+/// Normalize a font name that may contain a subset prefix.
+/// Subset font names follow the pattern: `PREFIX+BaseFontName-PREFIX+BaseFontName-Suffix`
+/// (e.g., `AEWMEC+KaiTi-AEWMEC+KaiTi-0` → base name `KaiTi`)
+/// Also handles PostScript font names like `CourierNewPSMT` → `Courier New`.
+fn normalize_font_name(raw: &str) -> String {
+    // Step 1: Extract base font name from subset prefix pattern
+    // Subset prefix format: UPPERCASE_LETTERS+BaseName
+    let base = if let Some(plus_pos) = raw.find('+') {
+        // Found subset prefix — extract text after '+' up to next '-' or end
+        let after_plus = &raw[plus_pos + 1..];
+        let end = after_plus.find('-').unwrap_or(after_plus.len());
+        &after_plus[..end]
+    } else {
+        raw
+    };
+
+    // Step 2: Map PostScript font names to standard CSS font-family names
+    match base {
+        "CourierNewPSMT" => "Courier New",
+        "TimesNewRomanPSMT" => "Times New Roman",
+        "ArialMT" => "Arial",
+        "Arial-BoldMT" => "Arial",
+        "SimSun" | "STSong" => "宋体",
+        "KaiTi" | "STKaiti" => "楷体",
+        "SimHei" | "STHeiti" => "黑体",
+        "FangSong" | "STFangsong" => "仿宋",
+        other => other,
+    }.to_string()
+}
+
 /// Build SVG text element from an OFD TextObject
 fn build_svg_text(
     text_obj: &OfdTextObject,
@@ -314,9 +347,12 @@ fn build_svg_text(
         if !f.family_name.is_empty() { f.family_name.clone() } else { f.font_name.clone() }
     }).unwrap_or_else(|| "SimSun".to_string());
 
+    // Normalize subset font names (e.g., "AEWMEC+KaiTi-AEWMEC+KaiTi-0" → "KaiTi")
+    let font_base = normalize_font_name(&font_family_raw);
+
     // Font fallback: add generic CJK/serif/sans-serif fallbacks for cross-platform rendering.
     // SVG font-family is CSS: names with spaces need single quotes (attr value is in double quotes).
-    let font_family = match font_family_raw.as_str() {
+    let font_family = match font_base.as_str() {
         "楷体" | "KaiTi" | "STKaiti" => "楷体, KaiTi, STKaiti, serif".to_string(),
         "宋体" | "SimSun" | "STSong" => "宋体, SimSun, STSong, serif".to_string(),
         "黑体" | "SimHei" | "STHeiti" => "黑体, SimHei, STHeiti, sans-serif".to_string(),
@@ -510,74 +546,49 @@ fn ofd_path_to_svg(data: &str) -> String {
 // OFD Content Parsing
 // =====================================================
 
-/// Extract Layer DrawParam IDs from content XML.
-/// OFD Layer has DrawParam="4" attribute pointing to a DrawParam in PublicRes.xml.
-/// Returns all DrawParam IDs found on Layer elements.
-fn extract_layer_draw_param_ids(xml: &str) -> Vec<u32> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut ids = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let tag = local_tag_name(&e.name());
-                if tag == "Layer" {
-                    if let Some(v) = attr_val(&e, "DrawParam") {
-                        if let Ok(id) = v.parse::<u32>() {
-                            ids.push(id);
-                        }
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    ids
-}
-
 /// Apply DrawParam defaults to paths and texts that have no explicit stroke/fill color.
+/// Each object carries its own `layer_draw_param` from the Layer it belongs to,
+/// so we apply per-object DrawParam inheritance rather than a single global default.
 fn apply_draw_param_defaults(
     paths: &mut [OfdPathObject],
     texts: &mut [OfdTextObject],
     draw_params: &HashMap<u32, OfdDrawParam>,
-    layer_dp_ids: &[u32],
 ) {
-    // Resolve defaults from the first Layer DrawParam
-    let (default_lw, default_stroke, default_fill) = if let Some(&dp_id) = layer_dp_ids.first() {
-        resolve_draw_param(draw_params, dp_id)
-    } else {
-        return; // no DrawParam to inherit
-    };
+    // Cache resolved DrawParam results to avoid re-resolving the same ID
+    let mut dp_cache: HashMap<u32, (f64, Option<(u8, u8, u8)>, Option<(u8, u8, u8)>)> = HashMap::new();
 
     for p in paths.iter_mut() {
-        if p.stroke_color.is_none() {
-            p.stroke_color = default_stroke;
+        if let Some(dp_id) = p.layer_draw_param {
+            let (lw, stroke, fill) = *dp_cache.entry(dp_id).or_insert_with(|| resolve_draw_param(draw_params, dp_id));
+            if p.stroke_color.is_none() {
+                p.stroke_color = stroke;
+            }
+            if p.fill_color.is_none() {
+                p.fill_color = fill;
+            }
+            if p.line_width == 0.0 {
+                p.line_width = lw;
+            }
         }
-        if p.fill_color.is_none() {
-            p.fill_color = default_fill;
-        }
-        if p.line_width == 0.0 {
-            p.line_width = default_lw;
-        }
+        // Objects without layer_draw_param use OFD default (black stroke, no fill) — no inheritance
     }
 
     for t in texts.iter_mut() {
-        if t.fill_color.is_none() {
-            t.fill_color = default_fill;
-        }
-        if t.stroke_color.is_none() {
-            t.stroke_color = default_stroke;
+        if let Some(dp_id) = t.layer_draw_param {
+            let (_lw, stroke, fill) = *dp_cache.entry(dp_id).or_insert_with(|| resolve_draw_param(draw_params, dp_id));
+            if t.fill_color.is_none() {
+                t.fill_color = fill;
+            }
+            if t.stroke_color.is_none() {
+                t.stroke_color = stroke;
+            }
         }
     }
 }
 
 /// Parse OFD content XML (Page or Template) and extract render objects.
 /// Returns (text_objects, path_objects, image_objects)
+/// Each object records its Layer's DrawParam ID in `layer_draw_param` for per-Layer inheritance.
 fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<OfdImageObject>) {
     use quick_xml::events::Event;
     use quick_xml::Reader;
@@ -599,12 +610,21 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
     let mut current_path: Option<OfdPathObject> = None;
     let mut current_img: Option<OfdImageObject> = None;
     let mut in_text_code = false;
+    let mut current_layer_dp: Option<u32> = None; // DrawParam of the current Layer
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let tag_local = local_tag_name(&e.name());
                 match tag_local.as_str() {
+                    "Layer" => {
+                        // Track this Layer's DrawParam
+                        if let Some(v) = attr_val(&e, "DrawParam") {
+                            current_layer_dp = v.parse().ok();
+                        } else {
+                            current_layer_dp = None;
+                        }
+                    }
                     "TextObject" => {
                         let mut t = OfdTextObject::default();
                         if let Some(v) = attr_val(&e, "ID") { t.id = v.parse().unwrap_or(0); }
@@ -617,6 +637,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "Alpha") { t.alpha = v.parse().ok(); }
                         if let Some(v) = attr_val(&e, "BlendMode") { t.blend_mode = Some(v); }
                         if let Some(v) = attr_val(&e, "Weight") { t.weight = v.parse().unwrap_or(400); }
+                        t.layer_draw_param = current_layer_dp;
                         current_text = Some(t);
                     }
                     "PathObject" => {
@@ -628,6 +649,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "LineWidth") { p.line_width = v.parse().unwrap_or(0.25); }
                         if let Some(v) = attr_val(&e, "Fill") { p.fill = v == "true"; }
                         if let Some(v) = attr_val(&e, "Alpha") { p.alpha = v.parse().ok(); }
+                        p.layer_draw_param = current_layer_dp;
                         current_path = Some(p);
                     }
                     "ImageObject" => {
@@ -682,6 +704,14 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                 // Self-closing elements like <ImageObject ... /> or <TextObject ... />
                 let tag_local = local_tag_name(&e.name());
                 match tag_local.as_str() {
+                    "Layer" => {
+                        // Self-closing Layer: just update current_layer_dp
+                        if let Some(v) = attr_val(&e, "DrawParam") {
+                            current_layer_dp = v.parse().ok();
+                        } else {
+                            current_layer_dp = None;
+                        }
+                    }
                     "TextObject" => {
                         let mut t = OfdTextObject::default();
                         if let Some(v) = attr_val(&e, "ID") { t.id = v.parse().unwrap_or(0); }
@@ -693,6 +723,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "CTM") { t.ctm = parse_f6(&v); }
                         if let Some(v) = attr_val(&e, "Alpha") { t.alpha = v.parse().ok(); }
                         if let Some(v) = attr_val(&e, "Weight") { t.weight = v.parse().unwrap_or(400); }
+                        t.layer_draw_param = current_layer_dp;
                         text_objs.push(t);
                     }
                     "PathObject" => {
@@ -704,6 +735,7 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
                         if let Some(v) = attr_val(&e, "LineWidth") { p.line_width = v.parse().unwrap_or(0.25); }
                         if let Some(v) = attr_val(&e, "Fill") { p.fill = v == "true"; }
                         if let Some(v) = attr_val(&e, "Alpha") { p.alpha = v.parse().ok(); }
+                        p.layer_draw_param = current_layer_dp;
                         path_objs.push(p);
                     }
                     "ImageObject" => {
@@ -748,6 +780,10 @@ fn parse_ofd_content(xml: &str) -> (Vec<OfdTextObject>, Vec<OfdPathObject>, Vec<
             Ok(Event::End(e)) => {
                 let tag_local = local_tag_name(&e.name());
                 match tag_local.as_str() {
+                    "Layer" => {
+                        // Exiting Layer: reset to no DrawParam
+                        current_layer_dp = None;
+                    }
                     "TextObject" => {
                         if let Some(t) = current_text.take() {
                             text_objs.push(t);
@@ -1466,6 +1502,249 @@ fn extract_ofd_images(ofd_path: &str) -> Result<Vec<(String, String, u32, u32)>,
 }
 
 // =====================================================
+// Text-based Invoice Extraction (Fallback)
+// =====================================================
+
+/// Extract invoice data from text content when no CustomData or CustomTag is available.
+/// This handles OFD files from non-standard producers that embed subset fonts
+/// but don't include structured XML metadata.
+///
+/// Strategy: scan text objects in order, detect label patterns, and extract
+/// values from the same text (after "：") or the next text object.
+fn extract_invoice_from_text(texts: &[&OfdTextObject]) -> OfdInvoiceInfo {
+    let mut info = OfdInvoiceInfo::default();
+    let mut section = ""; // "buyer" or "seller"
+    let mut name_count = 0; // 1st "名称" = buyer, 2nd = seller
+    let mut taxid_count = 0; // 1st "纳税人识别号" = buyer, 2nd = seller
+    let mut found_jiashui_label = false; // "价税合计" marker (may be separate from "小写")
+    let mut found_xiaoxie_label = false; // "（小写）" after "价税合计"
+    let mut found_heji_label = false; // "合计" (non-价税合计) marker
+
+    // Pre-concatenate adjacent single-character texts (some OFDs split CJK labels into
+    // individual characters, e.g., "购""买""方""信""息" instead of "购买方信息").
+    // We accumulate into a buffer and flush when we see a multi-char text or a label.
+    let mut char_buf = String::new();
+    let flush_buf = |buf: &mut String| -> Option<String> {
+        if buf.len() >= 2 {
+            let s = buf.trim().to_string();
+            buf.clear();
+            Some(s)
+        } else {
+            buf.clear();
+            None
+        }
+    };
+
+    // We process texts in a two-pass approach:
+    // Pass 1: Concatenate single-char sequences into composite labels
+    // Pass 2: Apply pattern matching on the composite sequence
+
+    let mut composite_texts: Vec<String> = Vec::new();
+    for t in texts {
+        let text = t.text.trim();
+        if text.is_empty() { continue; }
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() == 1 {
+            char_buf.push(chars[0]);
+        } else {
+            // Flush accumulated single chars first
+            if let Some(composite) = flush_buf(&mut char_buf) {
+                composite_texts.push(composite);
+            }
+            composite_texts.push(text.to_string());
+        }
+    }
+    // Flush remaining
+    if let Some(composite) = flush_buf(&mut char_buf) {
+        composite_texts.push(composite);
+    }
+
+    // Pass 2: Pattern matching on composite text sequence
+    for (i, text) in composite_texts.iter().enumerate() {
+        let t = text.as_str();
+        if t.is_empty() { continue; }
+
+        // Remove spaces for flexible matching (e.g., "合        计" → "合计")
+        let t_nospace: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+        let t_nospace_ref = t_nospace.as_str();
+
+        // Detect buyer/seller section boundaries
+        if t_nospace_ref.contains("购买方") || t_nospace_ref.contains("买方") {
+            section = "buyer";
+        }
+        if t_nospace_ref.contains("销售方") || t_nospace_ref.contains("卖方") {
+            section = "seller";
+        }
+
+        // Invoice number
+        if (t.contains("发票号码") || t_nospace_ref.contains("发票号码")) && info.invoice_no.is_none() {
+            info.invoice_no = extract_composite_value(t, &composite_texts, i, "taxid");
+        }
+
+        // Invoice date
+        if (t.contains("开票日期") || t_nospace_ref.contains("开票日期")) && info.invoice_date.is_none() {
+            info.invoice_date = extract_composite_value(t, &composite_texts, i, "any");
+        }
+
+        // Name label — 1st occurrence = buyer, 2nd = seller
+        // (Some OFDs have "名称：" as a standalone label before each section's value)
+        if (t.contains("名称") || t_nospace_ref.contains("名称"))
+            && !t.contains("货物") && !t.contains("劳务") && !t.contains("项目") {
+            name_count += 1;
+            let value = extract_composite_value(t, &composite_texts, i, "name");
+            // If section is still unknown, use occurrence count
+            let effective_section = if section.is_empty() {
+                if name_count == 1 { "buyer" } else { "seller" }
+            } else { section };
+            match effective_section {
+                "buyer" if info.buyer_name.is_none() => info.buyer_name = value,
+                "seller" if info.seller_name.is_none() => info.seller_name = value,
+                _ => {}
+            }
+        }
+
+        // Tax ID — 1st occurrence = buyer, 2nd = seller
+        if (t.contains("纳税人识别号") || t.contains("统一社会信用代码"))
+            && !t.contains("货物") {
+            taxid_count += 1;
+            let value = extract_composite_value(t, &composite_texts, i, "taxid");
+            let effective_section = if section.is_empty() {
+                if taxid_count == 1 { "buyer" } else { "seller" }
+            } else { section };
+            match effective_section {
+                "buyer" if info.buyer_tax_id.is_none() => info.buyer_tax_id = value,
+                "seller" if info.seller_tax_id.is_none() => info.seller_tax_id = value,
+                _ => {}
+            }
+        }
+
+        // Amount detection
+        // "价税合计" label — may be followed by separate "（小写）" label
+        if t_nospace_ref.contains("价税合计") {
+            if t_nospace_ref.contains("小写") {
+                found_xiaoxie_label = true;
+            } else {
+                found_jiashui_label = true;
+            }
+        }
+        // "（小写）" or "小写" after "价税合计"
+        if (t.contains("小写") || t_nospace_ref.contains("小写")) && found_jiashui_label {
+            found_xiaoxie_label = true;
+        }
+        // "合计" label (not "价税合计") — handle spaced variants like "合        计"
+        if (t_nospace_ref.contains("合计") || t_nospace_ref == "合计")
+            && !t_nospace_ref.contains("价税") {
+            found_heji_label = true;
+        }
+
+        // ¥ amount values
+        if t.starts_with("¥") || t.starts_with("￥") {
+            let amt_str = t.trim_start_matches('¥').trim_start_matches('￥').trim();
+            if let Ok(amt) = amt_str.parse::<f64>() {
+                if found_xiaoxie_label {
+                    // This ¥ is after "价税合计（小写）" → total amount with tax
+                    if info.amount_tax.is_none() {
+                        info.amount_tax = Some(amt);
+                    }
+                    found_xiaoxie_label = false;
+                    found_jiashui_label = false;
+                } else if found_heji_label {
+                    // This ¥ is after "合计" → subtotal (no tax or with tax)
+                    if info.amount_no_tax.is_none() {
+                        info.amount_no_tax = Some(amt);
+                    }
+                    found_heji_label = false;
+                }
+            }
+        }
+
+        // Invoice type detection
+        if info.invoice_type.is_none() {
+            if t.contains("增值税专用") {
+                info.invoice_type = Some("增值税专用发票".to_string());
+            } else if t.contains("增值税普通") || t.contains("增值税电子普通") {
+                info.invoice_type = Some("增值税普通发票".to_string());
+            } else if t.contains("电子发票") {
+                info.invoice_type = Some("电子发票".to_string());
+            }
+        }
+    }
+
+    // Compute missing amount fields
+    // If we have amount_tax but no breakdown, assume no_tax = amount_tax and tax = 0
+    if info.amount_tax.is_some() && info.amount_no_tax.is_none() {
+        info.amount_no_tax = info.amount_tax;
+        info.tax_amount = Some(0.0);
+    }
+    // If we have amount_no_tax but no amount_tax, try to compute
+    if info.amount_no_tax.is_some() && info.amount_tax.is_none() {
+        if let Some(tax) = info.tax_amount {
+            info.amount_tax = Some(((info.amount_no_tax.unwrap() + tax) * 100.0).round() / 100.0);
+        } else {
+            // No tax info → assume amount_no_tax IS the total (tax exempt)
+            info.amount_tax = info.amount_no_tax;
+            info.tax_amount = Some(0.0);
+        }
+    }
+
+    info
+}
+
+/// Extract a value from a label text or the next text in the composite sequence.
+/// First tries to get value after "：" or ":" in the same text.
+/// If not found, looks at the next 1-3 texts for a non-label value.
+/// `value_kind` hints at the expected format: "name" (CJK chars), "taxid" (alphanumeric), or "any".
+fn extract_composite_value(label_text: &str, texts: &[String], label_idx: usize, value_kind: &str) -> Option<String> {
+    // Try extracting from same text after colon
+    for sep in &["：", ":"] {
+        if let Some(pos) = label_text.find(sep) {
+            let after = label_text[pos + sep.len()..].trim();
+            if !after.is_empty() && value_matches(after, value_kind) {
+                return Some(after.to_string());
+            }
+        }
+    }
+
+    // Look at next texts for the value
+    for j in (label_idx + 1)..std::cmp::min(label_idx + 5, texts.len()) {
+        let next_text = texts[j].trim();
+        if !next_text.is_empty() && !is_common_label(next_text) && value_matches(next_text, value_kind) {
+            return Some(next_text.to_string());
+        }
+    }
+
+    None
+}
+
+/// Check if a candidate value matches the expected format kind.
+fn value_matches(text: &str, kind: &str) -> bool {
+    match kind {
+        "taxid" => {
+            // Tax IDs are alphanumeric (digits + possible X/x suffix), no CJK characters
+            text.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        "name" => {
+            // Names should contain at least one CJK character or be a known format
+            text.chars().any(|c| c > '\u{2E80}') // CJK and other East Asian chars
+        }
+        _ => true,
+    }
+}
+
+/// Check if a text looks like a common invoice label (not a value)
+fn is_common_label(text: &str) -> bool {
+    let labels = [
+        "发票号码", "开票日期", "名称", "纳税人识别号", "统一社会信用代码",
+        "地址", "电话", "开户行", "账号", "购买方", "销售方",
+        "价税合计", "合计", "备注", "开票人", "收款人", "复核人",
+        "货物", "劳务", "规格型号", "单位", "数量", "单价", "金额",
+        "税率", "税额", "项目名称", "小写", "大写",
+    ];
+    labels.iter().any(|l| text.contains(l))
+        || text.ends_with("：") || text.ends_with(":")
+}
+
+// =====================================================
 // Public API
 // =====================================================
 
@@ -1507,7 +1786,7 @@ pub fn parse_ofd_file(ofd_path: &str) -> Result<OfdResult, String> {
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                     if local_tag_name(&e.name()) == "DocRoot" {
                         let t = read_element_text(&mut rdr);
-                        root = t.trim().to_string();
+                        root = t.trim().trim_start_matches('/').to_string();
                         break;
                     }
                 }
@@ -1595,9 +1874,8 @@ pub fn parse_ofd_file(ofd_path: &str) -> Result<OfdResult, String> {
     // 6. Parse template content (background layer)
     let (tpl_texts, tpl_paths, tpl_imgs) = if !template_path.is_empty() {
         if let Some(xml) = zip_read_str(&mut archive, &template_path) {
-            let layer_dp_ids = extract_layer_draw_param_ids(&xml);
             let (mut t, mut p, i) = parse_ofd_content(&xml);
-            apply_draw_param_defaults(&mut p, &mut t, &draw_params, &layer_dp_ids);
+            apply_draw_param_defaults(&mut p, &mut t, &draw_params);
             (t, p, i)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
@@ -1734,6 +2012,47 @@ pub fn parse_ofd_file(ofd_path: &str) -> Result<OfdResult, String> {
             invoice_info.invoice_type = Some("电子发票".to_string());
             break;
         }
+    }
+    // Also detect from page texts (when there's no template layer)
+    if invoice_info.invoice_type.is_none() {
+        for t in &page_texts {
+            if t.text.contains("增值税专用") {
+                invoice_info.invoice_type = Some("增值税专用发票".to_string());
+                break;
+            } else if t.text.contains("增值税普通") || t.text.contains("增值税电子普通") {
+                invoice_info.invoice_type = Some("增值税普通发票".to_string());
+                break;
+            } else if t.text.contains("电子发票") {
+                invoice_info.invoice_type = Some("电子发票".to_string());
+                break;
+            }
+        }
+    }
+
+    // 11b. Text-based fallback extraction when no CustomData or CustomTag
+    // This handles OFD files from non-tax producers (e.g., dzcp) that embed fonts
+    // but don't include structured metadata.
+    if invoice_info.invoice_no.is_none() && invoice_info.invoice_date.is_none()
+        && invoice_info.buyer_name.is_none() && invoice_info.seller_name.is_none() {
+        // Combine template + page texts (preserving order by ID)
+        let mut all_texts: Vec<&OfdTextObject> = Vec::new();
+        all_texts.extend(&tpl_texts);
+        all_texts.extend(&page_texts);
+        all_texts.sort_by_key(|t| t.id);
+
+        let extracted = extract_invoice_from_text(&all_texts);
+
+        // Only fill fields that are still None
+        if invoice_info.invoice_no.is_none() { invoice_info.invoice_no = extracted.invoice_no; }
+        if invoice_info.invoice_date.is_none() { invoice_info.invoice_date = extracted.invoice_date; }
+        if invoice_info.buyer_name.is_none() { invoice_info.buyer_name = extracted.buyer_name; }
+        if invoice_info.buyer_tax_id.is_none() { invoice_info.buyer_tax_id = extracted.buyer_tax_id; }
+        if invoice_info.seller_name.is_none() { invoice_info.seller_name = extracted.seller_name; }
+        if invoice_info.seller_tax_id.is_none() { invoice_info.seller_tax_id = extracted.seller_tax_id; }
+        if invoice_info.amount_no_tax.is_none() { invoice_info.amount_no_tax = extracted.amount_no_tax; }
+        if invoice_info.tax_amount.is_none() { invoice_info.tax_amount = extracted.tax_amount; }
+        if invoice_info.amount_tax.is_none() { invoice_info.amount_tax = extracted.amount_tax; }
+        if invoice_info.invoice_type.is_none() { invoice_info.invoice_type = extracted.invoice_type; }
     }
 
     // 12. Build SVG
