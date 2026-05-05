@@ -1266,13 +1266,17 @@ fn build_svg_path(p: &OfdPathObject, scale: f64) -> String {
     if p.fill {
         attrs.push_str(" fill-rule=\"nonzero\"");
     }
-    attrs.push_str(&stroke_attr(p.stroke_color, p.alpha));
+    // Per OFD spec, default stroke color is black (0,0,0) when not specified.
+    // This ensures PathObjects without explicit StrokeColor (and no DrawParam inheritance)
+    // are still visible — e.g. the ⊗ symbol (circled-X) in the uppercase amount area.
+    attrs.push_str(&stroke_attr(p.stroke_color.or(Some((0, 0, 0))), p.alpha));
     if p.fill {
         if let Some(fc) = p.fill_color {
             attrs.push_str(&fill_attr(Some(fc), p.alpha));
         } else {
-            // fill=true but no explicit fill_color: don't fall back to stroke_color
-            // (that would fill the shape solid and hide internal strokes like the ¥ cross)
+            // fill=true but no explicit fill_color: per OFD spec default is black,
+            // but filling solid would hide internal strokes (e.g. the ⊗ cross).
+            // Use fill="none" so the circle outline + X cross are both visible via stroke.
             attrs.push_str(" fill=\"none\"");
         }
     } else {
