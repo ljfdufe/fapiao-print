@@ -849,6 +849,10 @@ function loadFileFromDataUrlFast(fd) {
           _ofdPage: true
         });
         resolve(fileObj);
+        // Fallback OCR: OFD XML 未提取到有效数据时，以 OCR 作补充
+        if (S.feat.ocrEnabled && !info.amountTax && !info.amountNoTax && !info.sellerName) {
+          applyOcrAsync(fileObj, payload.pngUrl);
+        }
       }).catch(function(err) {
         // Fallback: call open_ofd_images for bitmap extraction
         console.warn('[OFD] parse_ofd failed, falling back to bitmap:', err);
