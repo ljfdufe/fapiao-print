@@ -1038,6 +1038,466 @@ pub(crate) fn decode_base64_image(data_url: &str) -> Result<image::DynamicImage,
 // =====================================================
 // OCR — PaddleOCR via ocr-rs (MNN inference, high-accuracy Chinese OCR)
 // =====================================================
+// PDF Text Layer Extraction (no OCR dependency)
+// =====================================================
+
+/// A single text word extracted from PDF content stream, with bounding box.
+/// Coordinates are in the frontend pixel space (origin top-left, y-down),
+/// converted from PDF pt coordinates by the RENDER_DPI/72 scale factor.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfTextWord {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// A line of text words from PDF content stream.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfTextLine {
+    pub words: Vec<PdfTextWord>,
+    pub confidence: f32, // Always 1.0 for PDF text layer extraction
+}
+
+/// Result of PDF text layer extraction with word-level coordinates.
+/// Structured identically to OcrResult so the frontend can reuse
+/// `extractByCoordinates()` without modification.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfTextResult {
+    pub text: String,
+    pub lines: Vec<PdfTextLine>,
+    pub img_w: u32, // Page width in frontend pixels
+    pub img_h: u32, // Page height in frontend pixels
+}
+
+/// Extract text with coordinates from a PDF page's content stream.
+/// Parses Tm/Td (position) + Tj/TJ (text) operations, decodes text via
+/// font Encoding (ToUnicode CMap, UniGB, etc.), and outputs word-level
+/// bounding boxes in the same coordinate system as OCR results.
+///
+/// For scanned PDFs (no text layer), returns an empty PdfTextResult.
+/// ~5ms per page (pure data parsing, no AI inference).
+pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, String> {
+    use lopdf::Object;
+
+    let doc = lopdf::Document::load(pdf_path)
+        .map_err(|e| format!("PDF加载失败: {}", e))?;
+
+    let pages: std::collections::BTreeMap<u32, lopdf::ObjectId> = doc.get_pages();
+    let page_id = *pages.get(&(page_idx + 1)) // lopdf pages are 1-indexed
+        .ok_or_else(|| format!("PDF页面索引{}不存在", page_idx))?;
+
+    // Get page dimensions (pt units)
+    let ((_x1, _y1, _x2, _y2), (page_w_pt, page_h_pt)) = get_page_effective_box(&doc, page_id)?;
+    let scale = RENDER_DPI as f64 / 72.0; // pt → px
+    let page_w_px = (page_w_pt as f64 * scale) as u32;
+    let page_h_px = (page_h_pt as f64 * scale) as u32;
+
+    // Get font encodings for text decoding
+    let fonts = doc.get_page_fonts(page_id).unwrap_or_default();
+    let encodings: std::collections::BTreeMap<Vec<u8>, lopdf::Encoding> = fonts
+        .into_iter()
+        .filter_map(|(name, font_dict)| {
+            match font_dict.get_font_encoding(&doc) {
+                Ok(enc) => Some((name, enc)),
+                Err(_) => None,
+            }
+        })
+        .collect();
+
+    // Decode page content stream
+    let content = doc.get_and_decode_page_content(page_id)
+        .map_err(|e| format!("PDF内容流解码失败: {}", e))?;
+
+    // State tracking for text position
+    let mut cur_x: f64 = 0.0;
+    let mut cur_y: f64 = 0.0;
+    let mut line_start_x: f64 = 0.0; // x at start of current line (for Td offset)
+    let mut font_size: f64 = 12.0;
+    let mut leading: f64 = 0.0; // TL-set leading (0 = use font_size * 1.2)
+    let mut current_font: Vec<u8> = Vec::new();
+    let mut in_text_block = false;
+
+    // Graphics state stack for q/Q
+    #[derive(Clone)]
+    struct GfxState {
+        x: f64,
+        y: f64,
+        line_start_x: f64,
+        font_size: f64,
+        leading: f64,
+        font_name: Vec<u8>,
+    }
+    let mut state_stack: Vec<GfxState> = Vec::new();
+
+    let mut all_words: Vec<PdfTextWord> = Vec::new();
+    let mut full_text_parts: Vec<String> = Vec::new();
+    let mut need_space_before = false; // Insert space between Tj/TJ text fragments
+
+    for op in &content.operations {
+        match op.operator.as_str() {
+            "BT" => {
+                in_text_block = true;
+                cur_x = 0.0;
+                cur_y = 0.0;
+                line_start_x = 0.0;
+                leading = 0.0;
+                need_space_before = false;
+            }
+            "ET" => {
+                in_text_block = false;
+                full_text_parts.push("\n".to_string());
+                need_space_before = false;
+            }
+            "q" => {
+                state_stack.push(GfxState {
+                    x: cur_x, y: cur_y, line_start_x,
+                    font_size, leading, font_name: current_font.clone(),
+                });
+            }
+            "Q" => {
+                if let Some(state) = state_stack.pop() {
+                    cur_x = state.x;
+                    cur_y = state.y;
+                    line_start_x = state.line_start_x;
+                    font_size = state.font_size;
+                    leading = state.leading;
+                    current_font = state.font_name;
+                }
+            }
+            "Tf" if op.operands.len() >= 2 => {
+                // Font selection: /FontName size
+                if let Some(font_obj) = op.operands.first() {
+                    match font_obj {
+                        Object::Name(name) => current_font = name.clone(),
+                        Object::Reference(id) => {
+                            // Some PDFs reference font by object ID
+                            current_font = format!("{:?},{:?}", id.0, id.1).into_bytes();
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(size_obj) = op.operands.get(1) {
+                    match size_obj {
+                        Object::Real(r) => font_size = *r as f64,
+                        Object::Integer(i) => font_size = *i as f64,
+                        _ => {}
+                    }
+                }
+            }
+            "Tm" if op.operands.len() >= 6 && in_text_block => {
+                // Text matrix: a b c d e f Tm
+                // e = x position, f = y position (in PDF coordinate space, pt)
+                // Font size = vertical scale = d (or sqrt(a²+b²) for rotated text)
+                let d = match &op.operands[3] {
+                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
+                };
+                cur_x = match &op.operands[4] {
+                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
+                };
+                cur_y = match &op.operands[5] {
+                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
+                };
+                // Use vertical component d for font size (more reliable than a)
+                if d > 1.0 { font_size = d; }
+                // Tm sets a new absolute position — this becomes the line start
+                line_start_x = cur_x;
+            }
+            "Td" | "TD" if op.operands.len() >= 2 && in_text_block => {
+                // Move to next line: tx ty Td
+                // PDF spec: offset from start of current line, not from cur_x
+                let tx = match &op.operands[0] {
+                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
+                };
+                let ty = match &op.operands[1] {
+                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
+                };
+                cur_x = line_start_x + tx;
+                line_start_x = cur_x;
+                cur_y += ty;
+            }
+            "TL" if op.operands.len() >= 1 && in_text_block => {
+                // Set text leading
+                match &op.operands[0] {
+                    Object::Real(r) => leading = *r as f64,
+                    Object::Integer(i) => leading = *i as f64,
+                    _ => {}
+                }
+            }
+            "T*" if in_text_block => {
+                // Move to start of next line (leading offset)
+                let effective_leading = if leading > 0.0 { leading } else { font_size * 1.2 };
+                cur_y -= effective_leading;
+                cur_x = line_start_x; // Return to line start
+            }
+            "Tj" if in_text_block => {
+                // Show text string
+                if let Some(obj) = op.operands.first() {
+                    if let Some(decoded) = decode_text_object(obj, &encodings, &current_font, &doc) {
+                        if !decoded.is_empty() {
+                            let word = make_word(&decoded, cur_x, cur_y, font_size, page_h_pt, scale);
+                            all_words.push(word);
+                            if need_space_before { full_text_parts.push(" ".to_string()); }
+                            full_text_parts.push(decoded.clone());
+                            need_space_before = true;
+                            // Advance x position by approximate text width
+                            cur_x += approximate_text_width(&decoded, font_size);
+                        }
+                    }
+                }
+            }
+            "TJ" if in_text_block => {
+                // Show text with individual glyph positioning (array)
+                // Kern < -80 (in 1/1000 em) indicates a real word break;
+                // smaller kerns (-20..-50) are just spacing micro-adjustments.
+                const KERN_WORD_BREAK: f64 = -80.0;
+                if let Some(Object::Array(arr)) = op.operands.first() {
+                    let mut text_buf = String::new();
+                    for item in arr {
+                        match item {
+                            Object::String(bytes, _format) => {
+                                if let Some(decoded) = decode_bytes_with_encoding(bytes, &encodings, &current_font, &doc) {
+                                    text_buf.push_str(&decoded);
+                                }
+                            }
+                            Object::Integer(kern) => {
+                                // Kern displacement in 1/1000 of a unit of text space
+                                let kern_f = *kern as f64;
+                                // Only flush on large negative kern (word break)
+                                if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
+                                    let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                                    all_words.push(word);
+                                    if need_space_before { full_text_parts.push(" ".to_string()); }
+                                    full_text_parts.push(text_buf.clone());
+                                    need_space_before = true;
+                                    cur_x += approximate_text_width(&text_buf, font_size);
+                                    text_buf.clear();
+                                }
+                                // Apply kern offset
+                                cur_x += kern_f / 1000.0 * font_size;
+                            }
+                            Object::Real(kern) => {
+                                let kern_f = *kern as f64;
+                                if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
+                                    let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                                    all_words.push(word);
+                                    if need_space_before { full_text_parts.push(" ".to_string()); }
+                                    full_text_parts.push(text_buf.clone());
+                                    need_space_before = true;
+                                    cur_x += approximate_text_width(&text_buf, font_size);
+                                    text_buf.clear();
+                                }
+                                cur_x += kern_f / 1000.0 * font_size;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Flush remaining text
+                    if !text_buf.is_empty() {
+                        let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                        all_words.push(word);
+                        if need_space_before { full_text_parts.push(" ".to_string()); }
+                        full_text_parts.push(text_buf);
+                        need_space_before = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Group words into lines by y-coordinate proximity
+    let lines = group_words_into_lines(&all_words, page_h_px as f64);
+
+    Ok(PdfTextResult {
+        text: full_text_parts.join(""),
+        lines,
+        img_w: page_w_px,
+        img_h: page_h_px,
+    })
+}
+
+/// Create a PdfTextWord with coordinate conversion (PDF pt → frontend px).
+/// PDF coordinates: origin bottom-left, y-up.
+/// Frontend coordinates: origin top-left, y-down.
+fn make_word(text: &str, pdf_x: f64, pdf_y: f64, font_size: f64,
+             page_h_pt: f32, scale: f64) -> PdfTextWord {
+    let w = approximate_text_width(text, font_size) * scale;
+    let h = font_size * scale;
+    // Convert: frontend_y = (page_h - pdf_y - font_size) * scale
+    // The y in PDF is the baseline; the top of the glyph is approximately at y + font_size
+    let fx = pdf_x * scale;
+    let fy = (page_h_pt as f64 - pdf_y - font_size) * scale;
+    PdfTextWord {
+        text: text.to_string(),
+        x: fx,
+        y: fy.max(0.0),
+        w,
+        h,
+    }
+}
+
+/// Approximate text width in pt based on character types.
+/// CJK characters ≈ font_size, Latin/digits ≈ font_size * 0.5.
+fn approximate_text_width(text: &str, font_size: f64) -> f64 {
+    let mut width = 0.0;
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            width += font_size;
+        } else {
+            width += font_size * 0.5;
+        }
+    }
+    width
+}
+
+/// Check if a character is CJK (Chinese, Japanese, Korean)
+fn is_cjk(ch: char) -> bool {
+    let cp = ch as u32;
+    // CJK Unified Ideographs + common CJK ranges
+    (0x4E00..=0x9FFF).contains(&cp)   // CJK Unified Ideographs
+    || (0x3400..=0x4DBF).contains(&cp) // CJK Extension A
+    || (0xF900..=0xFAFF).contains(&cp) // CJK Compatibility Ideographs
+    || (0x3000..=0x303F).contains(&cp) // CJK Symbols and Punctuation
+    || (0xFF00..=0xFFEF).contains(&cp) // Fullwidth Forms
+    || (0x2E80..=0x2EFF).contains(&cp) // CJK Radicals Supplement
+    || (0x3040..=0x309F).contains(&cp) // Hiragana
+    || (0x30A0..=0x30FF).contains(&cp) // Katakana
+}
+
+/// Decode a text object (String or other) using the current font's encoding.
+fn decode_text_object(
+    obj: &lopdf::Object,
+    encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
+    font_name: &[u8],
+    pdf_doc: &lopdf::Document,
+) -> Option<String> {
+    match obj {
+        lopdf::Object::String(bytes, _format) => {
+            decode_bytes_with_encoding(bytes, encodings, font_name, pdf_doc)
+        }
+        lopdf::Object::Array(arr) => {
+            // Some PDFs use arrays in Tj
+            let mut result = String::new();
+            for item in arr {
+                if let lopdf::Object::String(bytes, _fmt) = item {
+                    if let Some(decoded) = decode_bytes_with_encoding(bytes, encodings, font_name, pdf_doc) {
+                        result.push_str(&decoded);
+                    }
+                }
+            }
+            if result.is_empty() { None } else { Some(result) }
+        }
+        _ => None,
+    }
+}
+
+/// Decode raw bytes using the font's encoding.
+fn decode_bytes_with_encoding(
+    bytes: &[u8],
+    encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
+    font_name: &[u8],
+    _pdf_doc: &lopdf::Document, // TODO: use for ToUnicode CMap lookup when font Encoding is unavailable
+) -> Option<String> {
+    // Try the font's encoding first
+    if let Some(encoding) = encodings.get(font_name) {
+        if let Ok(text) = encoding.bytes_to_string(bytes) {
+            return Some(text);
+        }
+    }
+
+    // Fallback: try UTF-8 decode (some PDFs store Unicode text directly)
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if !text.is_empty() && text.chars().any(|c| !c.is_control()) {
+            return Some(text.to_string());
+        }
+    }
+
+    // Fallback: try UTF-16BE decode (some CIDFonts use this encoding)
+    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+        let utf16: Vec<u16> = bytes.chunks(2)
+            .filter_map(|c| Some(u16::from_be_bytes([*c.get(0)?, *c.get(1)?])))
+            .collect();
+        if let Ok(text) = String::from_utf16(&utf16) {
+            if !text.is_empty() && text.chars().any(|c| !c.is_control()) {
+                return Some(text);
+            }
+        }
+    }
+
+    // Last resort: lossy Latin-1 decode
+    let text = String::from_utf8_lossy(bytes);
+    if !text.is_empty() && text.chars().any(|c| c.is_alphanumeric() || is_cjk(c)) {
+        return Some(text.to_string());
+    }
+
+    None
+}
+
+/// Group words into lines based on y-coordinate proximity.
+/// Words on the same line (within half a font-size vertical distance) are grouped together.
+fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLine> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by y first, then x
+    let mut sorted: Vec<&PdfTextWord> = words.iter().collect();
+    sorted.sort_by(|a, b| {
+        let dy = a.y - b.y;
+        if dy.abs() > a.h * 0.5 {
+            a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    let mut lines: Vec<PdfTextLine> = Vec::new();
+    let mut current_words: Vec<PdfTextWord> = Vec::new();
+    let mut current_y: f64 = sorted[0].y;
+    let mut line_height: f64 = sorted[0].h;
+
+    for word in sorted {
+        // Same line if y is within half a line height
+        if (word.y - current_y).abs() <= line_height * 0.5 {
+            current_words.push(word.clone());
+        } else {
+            // Finish current line
+            if !current_words.is_empty() {
+                // Sort words within line by x position
+                current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+                lines.push(PdfTextLine {
+                    words: current_words.clone(),
+                    confidence: 1.0,
+                });
+            }
+            // Start new line
+            current_words.clear();
+            current_words.push(word.clone());
+            current_y = word.y;
+            line_height = word.h;
+        }
+    }
+
+    // Don't forget the last line
+    if !current_words.is_empty() {
+        current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        lines.push(PdfTextLine {
+            words: current_words,
+            confidence: 1.0,
+        });
+    }
+
+    lines
+}
+
+// =====================================================
+// OCR Structures & Functions
+// =====================================================
 
 #[cfg(feature = "ocr")]
 /// A single OCR word with its bounding rectangle

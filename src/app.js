@@ -639,6 +639,11 @@ function updateOcrAllBtn() {
 
 function applyOcrAsync(fileObj, dataUrl) {
   if (!hasOcr || !isTauri || !invoke || window.__TAURI_CLOSING__) return;
+  // Skip OCR if PDF text extraction already covered all key fields
+  if (fileObj._pdfTextExtracted && fileObj.sellerName && fileObj.amountTax > 0) {
+    console.log('[OCR] PDF文字提取已覆盖关键字段，跳过OCR');
+    return;
+  }
   fileObj._ocrPending = true;
   updateFileItem(fileObj);
   updateOcrAllBtn();
@@ -799,7 +804,18 @@ function loadFileFromDataUrlFast(fd) {
               results.push(fileObj);
             }
             resolve(results.length === 1 ? results[0] : results);
-            // Queue OCR for each page in background — no blocking!
+            // PDF text layer extraction (~5ms, no OCR needed, lightweight builds too)
+            results.forEach(function(r) {
+              invoke('extract_pdf_text', {
+                pdfPath: r.pdfPath,
+                pageIdx: r.pdfPageIdx
+              }).then(function(pdfText) {
+                if (pdfText) applyPdfTextResult(r, pdfText);
+              }).catch(function(err) {
+                console.warn('[PDF文字提取] 失败，将回退OCR:', err);
+              });
+            });
+            // Queue OCR for each page in background — fallback for scanned PDFs
             results.forEach(function(r) {
               if (S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
             });

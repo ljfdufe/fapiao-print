@@ -292,17 +292,89 @@ function applyOcrResult(fileObj, ocrResult) {
       fileObj.taxAmount = info.taxAmount;
     }
     // Set seller info — for tickets, sellerName is the ticket type label
-    if (info.sellerName) fileObj.sellerName = info.sellerName;
+    // Guard: structured extraction (PDF text / OFD XML) takes priority over OCR
+    if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
     if (!info.isTicket) {
-      if (info.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
+      if (info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
     }
-    // Set additional extracted fields
-    if (info.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
-    if (info.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-    if (info.buyerName) fileObj.buyerName = info.buyerName;
-    if (info.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
+    // Set additional extracted fields (guard: don't overwrite existing values)
+    if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
+    if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
+    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
   } catch(e) {
     console.warn('[OCR] 结果应用失败:', e);
+  }
+}
+
+/**
+ * Apply PDF text layer extraction result to a file object.
+ * Called BEFORE OCR — structured extraction (PDF text / OFD XML) takes priority.
+ * The PdfTextResult has the same structure as OcrResult (text + lines + imgW/imgH),
+ * so we reuse extractByCoordinates() for field extraction.
+ *
+ * Modifies fileObj in place. Only fills empty fields (never overwrites).
+ * @param {Object} fileObj - The file object to update
+ * @param {Object} pdfTextResult - Result from Rust extract_pdf_text command
+ */
+function applyPdfTextResult(fileObj, pdfTextResult) {
+  if (!pdfTextResult || !pdfTextResult.lines || pdfTextResult.lines.length === 0) return;
+  try {
+    // PdfTextResult lines use {words: [{text,x,y,w,h}], confidence: 1.0}
+    // This is compatible with OcrLine structure expected by extractByCoordinates
+    var info = extractByCoordinates(pdfTextResult);
+
+    console.log('[PDF文字提取] 字段:', {
+      invoiceNo: info.invoiceNo || '(空)',
+      invoiceDate: info.invoiceDate || '(空)',
+      buyerName: info.buyerName || '(空)',
+      sellerName: info.sellerName || '(空)',
+      amountTax: info.amountTax || 0
+    });
+
+    // --- 后置校验：金额求和验证（含税价 ≈ 不含税 + 税额）---
+    if (info.amountTax > 0 && info.amountNoTax > 0) {
+      var _sum = Math.round((info.amountNoTax + info.taxAmount) * 100) / 100;
+      if (Math.abs(_sum - info.amountTax) > 0.02) {
+        console.warn('[PDF文字提取] 金额求和校验失败: 含税=' + info.amountTax +
+          ', 不含税=' + info.amountNoTax + ', 税额=' + info.taxAmount +
+          ', 验证=' + info.amountNoTax + '+' + info.taxAmount + '=' + _sum);
+        info.amountTax = 0; info.amountNoTax = 0; info.taxAmount = 0;
+      }
+    }
+
+    // Set _ocrText and _isTicket for display
+    fileObj._ocrText = info._ocrText || pdfTextResult.text || '';
+    fileObj._isTicket = info.isTicket || false;
+
+    // Only fill empty fields — structured extraction priority
+    if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
+    if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
+    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
+    if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
+    if (!info.isTicket) {
+      if (info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
+    }
+
+    // Amounts — same guard logic as applyOcrResult
+    var effAmt = info.amountTax > 0 ? info.amountTax : info.amountNoTax;
+    if (effAmt > 0 && !fileObj.amountTax && !fileObj.amountNoTax) {
+      fileObj.amount = effAmt;
+      fileObj.amountTax = info.amountTax;
+      fileObj.amountNoTax = info.amountNoTax;
+      fileObj.taxAmount = info.taxAmount || 0;
+    } else if (effAmt > 0 && fileObj.amountTax > 0) {
+      if (!fileObj.taxAmount && info.taxAmount > 0) {
+        fileObj.taxAmount = info.taxAmount;
+      }
+    } else if (info.taxAmount > 0 && !fileObj.taxAmount) {
+      fileObj.taxAmount = info.taxAmount;
+    }
+
+    fileObj._pdfTextExtracted = true;
+  } catch(e) {
+    console.warn('[PDF文字提取] 结果应用失败:', e);
   }
 }
 

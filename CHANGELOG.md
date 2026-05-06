@@ -1,5 +1,31 @@
 # 📋 更新日志
 
+## v1.9.4 — PDF 文字层提取（轻量版也能识别文字型PDF）
+
+### 🚀 新功能
+
+- **PDF 文字层提取**：解析 PDF 内容流（Tm/Td/Tj/TJ/T* 操作），从字体 Encoding 解码文本，输出带坐标的词级 bounding box。5ms/页，无需 OCR 引擎
+- **轻量版也能识别**：文字型 PDF 无需 OCR 版即可提取发票字段，轻量版（~3.5MB）从"完全不能识别"→"大部分可识别"
+- **OCR 自动跳过**：PDF 文字提取覆盖关键字段（销售方 + 金额）后自动跳过 OCR（省 1-3s/页）
+
+### 🐛 修复
+
+- **金额求和验证**：`applyPdfTextResult` 补齐 `含税≈不含税+税额` 校验
+- **车票标记**：`applyPdfTextResult` 补齐 `_isTicket` 设置
+- **Tm 字号**：改为取矩阵垂直分量 `d`（而非水平 `a`），避免旋转文本字号误判
+- **Td 行首偏移**：`cur_x` 改为从 `line_start_x` 偏移（PDF 规范），不再累加
+- **BT 状态重置**：补齐 `leading` 归零
+- **Tj/TJ 间空格分隔**：相邻文本片段间插入空格，防止粘合破坏正则匹配
+- **TJ kern 断词阈值**：`kern < -80` 才断词，小 kern 不再误拆词
+
+### 🔧 优化
+
+- **TL 操作支持**：解析 `TL` 设置行距，`T*` 使用实际 leading 值
+- **sellerCreditCode 车票过滤**：车票不设 `sellerCreditCode`
+- **ToUnicode CMap 预留**：`decode_bytes_with_encoding` 增加 `_pdf_doc` 参数
+
+---
+
 ## v1.9.3 — OFD ImageMask 遮罩兼容
 
 ### 🐛 修复

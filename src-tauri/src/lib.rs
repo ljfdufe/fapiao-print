@@ -1,7 +1,7 @@
 use tauri::{command, Emitter};
 
 mod pdf_engine;
-use pdf_engine::{PrinterInfo, FileData, RenderedPage, ComGuard, LayoutRenderRequest};
+use pdf_engine::{PrinterInfo, FileData, RenderedPage, ComGuard, LayoutRenderRequest, PdfTextResult};
 #[cfg(feature = "ocr")]
 use pdf_engine::{OcrResult, RenderedOcrPage};
 
@@ -133,6 +133,15 @@ fn ocr_pdf_page(pdf_path: String, page_index: u32, dpi: Option<u32>) -> Result<O
 #[command]
 fn check_ocr_available() -> bool {
     pdf_engine::check_ocr_available()
+}
+
+/// Extract text with coordinates from a PDF page's content stream.
+/// No OCR needed — parses the PDF's native text layer directly.
+/// ~5ms per page vs ~1-3s for OCR. Works in lightweight (non-OCR) builds.
+#[command]
+async fn extract_pdf_text(pdf_path: String, page_idx: u32) -> Result<PdfTextResult, String> {
+    pdf_engine::extract_pdf_text(&pdf_path, page_idx)
+        .map_err(|e| e.to_string())
 }
 
 /// Get app version from Cargo.toml (compiled in at build time)
@@ -592,6 +601,7 @@ pub fn run() {
         ocr_image,
         ocr_pdf_page,
         check_ocr_available,
+        extract_pdf_text,
         get_app_version,
         get_config,
         get_temp_dir,
@@ -611,6 +621,7 @@ pub fn run() {
         open_url,
         open_file,
         check_ocr_available,
+        extract_pdf_text,
         get_app_version,
         get_config,
         get_temp_dir,
