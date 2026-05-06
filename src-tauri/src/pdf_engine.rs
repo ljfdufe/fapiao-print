@@ -404,7 +404,7 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
 /// Instead: Rust render → decode in memory → OCR → return result directly.
 /// Returns OcrResult with coordinates in the original (full-DPI) pixel space.
 #[cfg(all(target_os = "windows", feature = "ocr"))]
-pub(crate) fn ocr_pdf_page(pdf_path: &str, page_index: u32, dpi: Option<u32>) -> Result<OcrResult, String> {
+pub(crate) fn ocr_pdf_page(pdf_path: &str, page_index: u32, dpi: Option<u32>, ocr_precision: Option<&str>) -> Result<OcrResult, String> {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
@@ -503,15 +503,15 @@ pub(crate) fn ocr_pdf_page(pdf_path: &str, page_index: u32, dpi: Option<u32>) ->
 
     log::info!("ocr_pdf_page: page {} ({}x{}) decoded, running OCR", page_index + 1, img.width(), img.height());
 
-    // Run OCR directly on the decoded image
-    run_ocr_on_image(img)
+    let max_dim = ocr_max_dim_for_precision(ocr_precision.unwrap_or("standard"));
+    run_ocr_on_image(img, max_dim)
 }
 
 /// Render PDF pages and run OCR in one pass — avoids the IPC round-trip
 /// where the frontend sends the rendered dataUrl back to Rust for OCR.
 /// The image is decoded from PNG bytes ONCE, OCR'd, then base64-encoded for preview.
 #[cfg(all(target_os = "windows", feature = "ocr"))]
-pub(crate) fn render_and_ocr_pdf(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedOcrPage>, String> {
+pub(crate) fn render_and_ocr_pdf(pdf_path: &str, dpi: u32, ocr_precision: Option<&str>) -> Result<Vec<RenderedOcrPage>, String> {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
@@ -523,6 +523,8 @@ pub(crate) fn render_and_ocr_pdf(pdf_path: &str, dpi: u32) -> Result<Vec<Rendere
     use std::time::Instant;
 
     let _com = ComGuard::init();
+
+    let max_dim = ocr_max_dim_for_precision(ocr_precision.unwrap_or("standard"));
 
     let path_h = HSTRING::from(pdf_path);
 
@@ -610,9 +612,8 @@ pub(crate) fn render_and_ocr_pdf(pdf_path: &str, dpi: u32) -> Result<Vec<Rendere
                     let orig_h = img.height();
                     let longest = orig_w.max(orig_h);
 
-                    // Resize for OCR if needed (same logic as run_ocr_on_image)
-                    let ocr_img = if longest > OCR_MAX_DIM {
-                        let rscale = OCR_MAX_DIM as f32 / longest as f32;
+                    let ocr_img = if longest > max_dim {
+                        let rscale = max_dim as f32 / longest as f32;
                         let nw = (orig_w as f32 * rscale).round() as u32;
                         let nh = (orig_h as f32 * rscale).round() as u32;
                         img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
@@ -1445,15 +1446,22 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
         return Vec::new();
     }
 
-    // Sort by y first, then x
+    // Sort by y first (top-to-bottom), then by x (left-to-right) within same y band.
+    // Must use a total order — the previous conditional comparison violated transitivity:
+    // when dy was small it compared by x, otherwise by y, which can produce inconsistent
+    // orderings (A<B by x, B<C by y, but C<A by x → not transitive → panic).
     let mut sorted: Vec<&PdfTextWord> = words.iter().collect();
     sorted.sort_by(|a, b| {
-        let dy = a.y - b.y;
-        if dy.abs() > a.h * 0.5 {
-            a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        // Group words into y-bands: round y to nearest half-line-height for stable grouping.
+        // Use the average height as band size to handle mixed font sizes.
+        let avg_h = (a.h + b.h) * 0.5;
+        let band = if avg_h > 0.5 { avg_h * 0.5 } else { 1.0 }; // min band = 1px
+        // Use total_cmp for f64 to guarantee total order (handles NaN safely)
+        let band_a = (a.y / band).round();
+        let band_b = (b.y / band).round();
+        band_a.total_cmp(&band_b).then_with(|| {
+            a.x.total_cmp(&b.x)
+        })
     });
 
     let mut lines: Vec<PdfTextLine> = Vec::new();
@@ -1469,7 +1477,7 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
             // Finish current line
             if !current_words.is_empty() {
                 // Sort words within line by x position
-                current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+                current_words.sort_by(|a, b| a.x.total_cmp(&b.x));
                 lines.push(PdfTextLine {
                     words: current_words.clone(),
                     confidence: 1.0,
@@ -1485,7 +1493,7 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
 
     // Don't forget the last line
     if !current_words.is_empty() {
-        current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        current_words.sort_by(|a, b| a.x.total_cmp(&b.x));
         lines.push(PdfTextLine {
             words: current_words,
             confidence: 1.0,
@@ -1646,20 +1654,26 @@ fn get_ocr_engine() -> Result<std::sync::MutexGuard<'static, Option<ocr_rs::OcrE
     Ok(lock)
 }
 
-/// Maximum longest-side dimension for OCR input.
-/// 1280px: balances accuracy and speed. v1.6.7 used full resolution (2480×3508 for 300DPI A4)
-/// which was more accurate but slower. 960 was too aggressive — small text (密码区/备注栏/明细行)
-/// got blurred. 1280 preserves detail while keeping detection model in its optimal range.
+/// OCR precision modes — longest-side max dimension for OCR input.
+/// - "fast" (1280px): Fast, good for normal-sized text. Small text (密码区/备注栏) may be blurry.
+/// - "standard" (1920px): Default. Good balance — handles most invoice text including small fonts.
+/// - "precise" (2800px): Maximum accuracy. Slower (~2-3x vs fast) but preserves all detail.
 #[cfg(feature = "ocr")]
-const OCR_MAX_DIM: u32 = 1280;
+pub fn ocr_max_dim_for_precision(precision: &str) -> u32 {
+    match precision {
+        "fast" => 1280,
+        "precise" => 2800,
+        _ => 1920,
+    }
+}
 
 /// OCR an image from a file path or base64 data URL.
 /// When `file_path` is provided, reads the image directly from disk — skipping
 /// the expensive base64 encode→IPC→decode round-trip.
 /// Falls back to `data_url` when `file_path` is None or file read fails.
 #[cfg(feature = "ocr")]
-pub fn ocr_image(data_url: &str, file_path: Option<&str>) -> Result<OcrResult, String> {
-    // Try file_path first (skip base64 entirely)
+pub fn ocr_image(data_url: &str, file_path: Option<&str>, ocr_precision: Option<&str>) -> Result<OcrResult, String> {
+    let max_dim = ocr_max_dim_for_precision(ocr_precision.unwrap_or("standard"));
     if let Some(path) = file_path {
         if !path.is_empty() {
             match std::fs::read(path) {
@@ -1674,7 +1688,7 @@ pub fn ocr_image(data_url: &str, file_path: Option<&str>) -> Result<OcrResult, S
                                     apply_exif_orientation(img, exif_orient)
                                 } else { img };
                                 log::info!("OCR from file_path: {} ({}x{})", path, img.width(), img.height());
-                                return run_ocr_on_image(img);
+                                return run_ocr_on_image(img, max_dim);
                             }
                             Err(e) => {
                                 log::warn!("Image decode from file_path {} failed: {}, falling back to data_url", path, e);
@@ -1688,14 +1702,13 @@ pub fn ocr_image(data_url: &str, file_path: Option<&str>) -> Result<OcrResult, S
             }
         }
     }
-    // Fallback to data_url
-    ocr_image_from_data(data_url)
+    ocr_image_from_data(data_url, max_dim)
 }
 
 /// OCR an image from base64 data URL, return structured result with coordinates.
 /// Internal helper — prefer `ocr_image()` which supports file_path.
 #[cfg(feature = "ocr")]
-pub fn ocr_image_from_data(data_url: &str) -> Result<OcrResult, String> {
+pub fn ocr_image_from_data(data_url: &str, max_dim: u32) -> Result<OcrResult, String> {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
@@ -1734,7 +1747,7 @@ pub fn ocr_image_from_data(data_url: &str) -> Result<OcrResult, String> {
         apply_exif_orientation(img, exif_orient)
     } else { img };
 
-    run_ocr_on_image(img)
+    run_ocr_on_image(img, max_dim)
 }
 
 /// Enhance image contrast for OCR using histogram stretching.
@@ -1808,7 +1821,7 @@ fn enhance_contrast_ocr(img: image::DynamicImage) -> image::DynamicImage {
 /// Core OCR logic: takes a pre-decoded image, resizes if needed, runs OCR,
 /// and returns structured result with coordinates.
 #[cfg(feature = "ocr")]
-fn run_ocr_on_image(mut img: image::DynamicImage) -> Result<OcrResult, String> {
+fn run_ocr_on_image(mut img: image::DynamicImage, max_dim: u32) -> Result<OcrResult, String> {
     use std::time::Instant;
     let t0 = Instant::now();
 
@@ -1816,22 +1829,18 @@ fn run_ocr_on_image(mut img: image::DynamicImage) -> Result<OcrResult, String> {
         return Err("应用正在关闭".to_string());
     }
 
-    // Resize for OCR if image is larger than OCR_MAX_DIM on the longest side.
-    // We keep the original dimensions for coordinate reporting so the frontend
-    // can normalize correctly.
     let orig_w = img.width();
     let orig_h = img.height();
     let longest = orig_w.max(orig_h);
 
-    if longest > OCR_MAX_DIM {
-        let scale = OCR_MAX_DIM as f32 / longest as f32;
+    if longest > max_dim {
+        let scale = max_dim as f32 / longest as f32;
         let new_w = (orig_w as f32 * scale).round() as u32;
         let new_h = (orig_h as f32 * scale).round() as u32;
-        // Lanczos3 produces sharper text edges than Triangle — critical for OCR accuracy
         img = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
         log::info!(
-            "OCR resize: {}x{} → {}x{} ({}ms)",
-            orig_w, orig_h, new_w, new_h,
+            "OCR resize: {}x{} → {}x{} (max_dim={}, {}ms)",
+            orig_w, orig_h, new_w, new_h, max_dim,
             t0.elapsed().as_millis()
         );
     }

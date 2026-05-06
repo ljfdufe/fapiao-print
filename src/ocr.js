@@ -391,7 +391,8 @@ async function applyOcr(fileObj, dataUrl, filePath) {
   try {
     var ocrResult = await invoke('ocr_image', {
       dataUrl: dataUrl || '',
-      filePath: filePath || fileObj._filePath || null
+      filePath: filePath || fileObj._filePath || null,
+      ocrPrecision: S.ocrPrecision || 'standard'
     });
     if (!ocrResult) return;
     applyOcrResult(fileObj, ocrResult);
@@ -411,7 +412,8 @@ async function applyOcrPdfPage(fileObj) {
   try {
     var ocrResult = await invoke('ocr_pdf_page', {
       pdfPath: fileObj._pdfPath,
-      pageIndex: fileObj._pdfPageIdx
+      pageIndex: fileObj._pdfPageIdx,
+      ocrPrecision: S.ocrPrecision || 'standard'
     });
     if (!ocrResult) return;
     applyOcrResult(fileObj, ocrResult);
@@ -579,7 +581,9 @@ function _extractByText(fullText) {
   }
 
   // --- Buyer/Seller credit codes (extract FIRST — use as anchor for name matching) ---
-  // First occurrence = buyer, second = seller (same left-to-right order as names)
+  // Standard VAT invoice layout: buyer credit code first, seller credit code second.
+  // Exception: personal invoices — buyer is an individual (no credit code),
+  // so a SINGLE credit code belongs to the seller, not the buyer.
   var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
   var codes = [];
   var ccPositions = [];
@@ -591,8 +595,13 @@ function _extractByText(fullText) {
       ccPositions.push(cm.index);
     }
   }
-  if (codes.length >= 1) result.buyerCreditCode = codes[0];
-  if (codes.length >= 2) result.sellerCreditCode = codes[1];
+  if (codes.length >= 2) {
+    result.buyerCreditCode = codes[0];
+    result.sellerCreditCode = codes[1];
+  } else if (codes.length === 1) {
+    // Single credit code → belongs to seller (personal buyer has no credit code)
+    result.sellerCreditCode = codes[0];
+  }
 
   // Priority 2: "销方名称" / "销方" abbreviated form (v1.6.7 strategy)
   if (!result.sellerName) {
@@ -692,9 +701,13 @@ function _extractByText(fullText) {
         if (standaloneCodes.indexOf(sc) < 0) standaloneCodes.push(sc);
       }
     }
-    if (!result.buyerCreditCode && standaloneCodes.length >= 1) result.buyerCreditCode = standaloneCodes[0];
-    if (!result.sellerCreditCode && standaloneCodes.length >= 2) result.sellerCreditCode = standaloneCodes[1];
-    else if (!result.sellerCreditCode && standaloneCodes.length === 1) result.sellerCreditCode = standaloneCodes[0];
+    // Same rule: 2+ codes → 1st=buyer, 2nd=seller; 1 code → seller only
+    if (standaloneCodes.length >= 2) {
+      if (!result.buyerCreditCode) result.buyerCreditCode = standaloneCodes[0];
+      if (!result.sellerCreditCode) result.sellerCreditCode = standaloneCodes[1];
+    } else if (standaloneCodes.length === 1) {
+      if (!result.sellerCreditCode) result.sellerCreditCode = standaloneCodes[0];
+    }
   }
 
   return result;
@@ -1271,7 +1284,19 @@ function extractByCoordinates(ocrResult) {
   var textAmounts = _extractAmountsByText(fullText);
   if (textAmounts.amountTax > 0) amountTax = textAmounts.amountTax;
   if (textAmounts.amountNoTax > 0) amountNoTax = textAmounts.amountNoTax;
-  if (textAmounts.taxAmount > 0) taxAmount = textAmounts.taxAmount;
+  // Track whether taxAmount was resolved by text extraction — 0 is a valid value
+  // (e.g., tax-exempt invoices). Without this flag, !taxAmount treats 0 as "not found"
+  // and coordinate-based fallback would overwrite it with a wrong amount.
+  var _taxAmountResolved = false;
+  if (textAmounts.taxAmount > 0) {
+    taxAmount = textAmounts.taxAmount;
+    _taxAmountResolved = true;
+  } else if (textAmounts.amountNoTax > 0 && textAmounts.amountTax > 0 &&
+             Math.abs(textAmounts.amountTax - textAmounts.amountNoTax) < 0.02) {
+    // amountNoTax == amountTax implies taxAmount = 0 (tax-exempt invoice)
+    taxAmount = 0;
+    _taxAmountResolved = true;
+  }
   console.log('[文本提取] 金额:', textAmounts);
 
   // --- Amount extraction (coordinate-based FALLBACK) ---
@@ -1399,7 +1424,7 @@ function extractByCoordinates(ocrResult) {
   // Since 税额 = 不含税 × 税率 and 税率 < 100%, the 不含税 is always larger.
   // We collect ALL amounts near "合计" and assign by value.
   // Must distinguish from "价税合计" — standalone "合计" without "价" to its left.
-  if (!amountNoTax || !taxAmount) {
+  if (!amountNoTax || !_taxAmountResolved) {
     var hejiLabels = _findWords(words, /合\s*计/);
     // Filter: standalone "合计" (no "价" or "税" nearby to the left)
     var standaloneHeji = hejiLabels.filter(function(hw) {
@@ -1468,7 +1493,7 @@ function extractByCoordinates(ocrResult) {
   }
 
   // Step 3: 税额 — "税额" keyword in amount region (coordinate-based FALLBACK)
-  if (!taxAmount) {
+  if (!_taxAmountResolved) {
   var seLabels = _findWords(words, /税\s*额/, undefined, undefined, 0.40, 0.75);
   if (seLabels.length > 0) {
     // Use the bottommost "税额" (in the 合计 row)
@@ -1480,13 +1505,14 @@ function extractByCoordinates(ocrResult) {
 
   // --- Cross-derivation ---
   // VAT formula: amountTax = amountNoTax + taxAmount
-  if (amountTax > 0 && amountNoTax > 0 && !taxAmount) {
+  if (amountTax > 0 && amountNoTax > 0 && !_taxAmountResolved) {
     taxAmount = Math.round((amountTax - amountNoTax) * 100) / 100;
+    if (taxAmount > 0) _taxAmountResolved = true;
   }
-  if (amountTax > 0 && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
+  if (amountTax > 0 && _taxAmountResolved && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
     amountNoTax = Math.round((amountTax - taxAmount) * 100) / 100;
   }
-  if (!amountTax && amountNoTax > 0 && taxAmount > 0) {
+  if (!amountTax && amountNoTax > 0 && _taxAmountResolved && taxAmount > 0) {
     amountTax = Math.round((amountNoTax + taxAmount) * 100) / 100;
   }
 
@@ -1533,18 +1559,20 @@ function extractByCoordinates(ocrResult) {
     var amtNum = _regexFindFirst('金\\s*额', normText);
     if (amtNum > 0 && (amountTax === 0 || Math.abs(amtNum - amountTax) > 0.01)) amountNoTax = amtNum;
   }
-  if (!taxAmount && amountTax > 0) {
-    taxAmount = _regexFindFirst('税\\s*额', normText);
+  if (!_taxAmountResolved && amountTax > 0) {
+    var _taxByRegex = _regexFindFirst('税\\s*额', normText);
+    if (_taxByRegex > 0) { taxAmount = _taxByRegex; _taxAmountResolved = true; }
   }
 
   // --- Cross-derivation after fallback ---
-  if (amountTax > 0 && amountNoTax > 0 && !taxAmount) {
+  if (amountTax > 0 && amountNoTax > 0 && !_taxAmountResolved) {
     taxAmount = Math.round((amountTax - amountNoTax) * 100) / 100;
+    if (taxAmount > 0) _taxAmountResolved = true;
   }
-  if (amountTax > 0 && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
+  if (amountTax > 0 && _taxAmountResolved && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
     amountNoTax = Math.round((amountTax - taxAmount) * 100) / 100;
   }
-  if (!amountTax && amountNoTax > 0 && taxAmount > 0) {
+  if (!amountTax && amountNoTax > 0 && _taxAmountResolved && taxAmount > 0) {
     amountTax = Math.round((amountNoTax + taxAmount) * 100) / 100;
   }
 
@@ -1553,10 +1581,12 @@ function extractByCoordinates(ocrResult) {
   if (amountTax > 0 && amountNoTax > 0 && amountTax < amountNoTax) {
     var _tmp = amountTax; amountTax = amountNoTax; amountNoTax = _tmp;
   }
-  // amountNoTax == amountTax → only reset for VAT invoices where they should differ
-  // For non-VAT invoices (no taxAmount found), they CAN be equal — don't reset
+  // amountNoTax == amountTax but taxAmount > 0 → data contradiction.
+  // Formula: 含税价 = 不含税价 + 税额. If 含税价 == 不含税价, 税额 MUST be 0.
+  // So taxAmount > 0 is the error — likely a coordinate mis-assignment.
+  // Trust the equality (amountNoTax == amountTax) and reset taxAmount to 0.
   if (amountNoTax > 0 && amountTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && taxAmount > 0) {
-    amountNoTax = 0;
+    taxAmount = 0;
   }
   // Only amountNoTax found → for non-VAT, amountTax = amountNoTax
   if (amountNoTax > 0 && !amountTax) {
@@ -1575,9 +1605,13 @@ function extractByCoordinates(ocrResult) {
       var cc = ccM[1].toUpperCase();
       if (allCc.indexOf(cc) < 0) allCc.push(cc);
     }
-    if (!buyerCreditCode && allCc.length >= 1) buyerCreditCode = allCc[0];
-    if (!sellerCreditCode && allCc.length >= 2) sellerCreditCode = allCc[1];
-    else if (!sellerCreditCode && allCc.length === 1) sellerCreditCode = allCc[0];
+    // Same logic as _extractByText: 2+ codes → 1st=buyer, 2nd=seller; 1 code → seller only
+    if (allCc.length >= 2) {
+      if (!buyerCreditCode) buyerCreditCode = allCc[0];
+      if (!sellerCreditCode) sellerCreditCode = allCc[1];
+    } else if (allCc.length === 1) {
+      if (!sellerCreditCode) sellerCreditCode = allCc[0];
+    }
   }
   if (!sellerCreditCode) {
     var sccRe = /\b([0-9][A-Z0-9]{17})\b/g;

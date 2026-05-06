@@ -73,12 +73,12 @@ fn render_pdf_pages(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedPa
 /// Returns preview images + OCR results together.
 #[cfg(feature = "ocr")]
 #[command]
-fn render_and_ocr_pdf(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedOcrPage>, String> {
+fn render_and_ocr_pdf(pdf_path: String, dpi: Option<u32>, ocr_precision: Option<String>) -> Result<Vec<RenderedOcrPage>, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::render_and_ocr_pdf(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI))
+    pdf_engine::render_and_ocr_pdf(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI), ocr_precision.as_deref())
 }
 
 /// Open a file with the default application (for auto-opening saved PDFs)
@@ -107,12 +107,12 @@ fn open_url(url: String) -> Result<(), String> {
 /// Falls back to `dataUrl` when `filePath` is None or file read fails.
 #[cfg(feature = "ocr")]
 #[command]
-fn ocr_image(data_url: String, file_path: Option<String>) -> Result<OcrResult, String> {
+fn ocr_image(data_url: String, file_path: Option<String>, ocr_precision: Option<String>) -> Result<OcrResult, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::ocr_image(&data_url, file_path.as_deref())
+    pdf_engine::ocr_image(&data_url, file_path.as_deref(), ocr_precision.as_deref())
 }
 
 /// Render a single PDF page and run OCR on it — zero IPC round-trip.
@@ -120,12 +120,12 @@ fn ocr_image(data_url: String, file_path: Option<String>) -> Result<OcrResult, S
 /// avoiding the expensive Rust→base64→IPC→frontend→downsample→base64→IPC→Rust cycle.
 #[cfg(feature = "ocr")]
 #[command]
-fn ocr_pdf_page(pdf_path: String, page_index: u32, dpi: Option<u32>) -> Result<OcrResult, String> {
+fn ocr_pdf_page(pdf_path: String, page_index: u32, dpi: Option<u32>, ocr_precision: Option<String>) -> Result<OcrResult, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::ocr_pdf_page(&pdf_path, page_index, dpi)
+    pdf_engine::ocr_pdf_page(&pdf_path, page_index, dpi, ocr_precision.as_deref())
 }
 
 /// Check whether OCR feature is available at runtime.
@@ -138,10 +138,17 @@ fn check_ocr_available() -> bool {
 /// Extract text with coordinates from a PDF page's content stream.
 /// No OCR needed — parses the PDF's native text layer directly.
 /// ~5ms per page vs ~1-3s for OCR. Works in lightweight (non-OCR) builds.
+///
+/// Uses `spawn_blocking` to run CPU-intensive PDF parsing off the IPC thread,
+/// preventing IPC message pump starvation that causes `ERR_CONNECTION_REFUSED`.
 #[command]
 async fn extract_pdf_text(pdf_path: String, page_idx: u32) -> Result<PdfTextResult, String> {
-    pdf_engine::extract_pdf_text(&pdf_path, page_idx)
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::extract_pdf_text(&pdf_path, page_idx)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("PDF文字提取任务失败: {}", e))?
 }
 
 /// Get app version from Cargo.toml (compiled in at build time)

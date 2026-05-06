@@ -30,6 +30,7 @@ var S = {
   editIdx: -1,
   selectedSlot: -1,  // Index of currently selected slot in preview (for per-slot adjustment)
   amtMode: 'tax',
+  ocrPrecision: 'standard',
   feat: {
     cutline: true, number: false, border: false, trimWhite: false,
     watermark: false, collate: true, duplex: false, pageNum: false,
@@ -155,13 +156,19 @@ function downsampleForOcr(dataUrl, maxDim) {
         canvas.width = w; canvas.height = h;
         var ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, w, h);
-        // Quality 0.92: higher quality preserves text edges for better OCR accuracy
         resolve(canvas.toDataURL('image/jpeg', 0.92));
       };
       img.onerror = function() { resolve(dataUrl); };
       img.src = dataUrl;
     } catch(e) { resolve(dataUrl); }
   });
+}
+
+function ocrMaxDim() {
+  var p = S.ocrPrecision || 'standard';
+  if (p === 'fast') return 1280;
+  if (p === 'precise') return 2800;
+  return 1920;
 }
 
 // =====================================================
@@ -655,11 +662,9 @@ function applyOcrAsync(fileObj, dataUrl) {
       // PDF page: use ocr_pdf_page — Rust renders + OCRs in one pass (zero IPC round-trip)
       ocrPromise = applyOcrPdfPage(fileObj);
     } else if (hasFilePath) {
-      // Image file: Rust reads from disk directly — fast, no base64 round-trip
       ocrPromise = applyOcr(fileObj, '', fileObj._filePath);
     } else {
-      // No file path (e.g. browser-mode image) — downsample for faster IPC
-      ocrPromise = downsampleForOcr(dataUrl, 1280).then(function(ocrDataUrl) {
+      ocrPromise = downsampleForOcr(dataUrl, ocrMaxDim()).then(function(ocrDataUrl) {
         return applyOcr(fileObj, ocrDataUrl);
       });
     }
@@ -712,6 +717,16 @@ function updateFileItem(fileObj) {
     sellerEl.innerHTML = sb;
     sellerEl.title = f.sellerName || '';
     sellerEl.style.display = sb ? '' : 'none';
+  } else if (sb) {
+    // .file-seller didn't exist at render time (no sellerName yet), insert it now
+    var nameEl = items[idx].querySelector('.file-name');
+    if (nameEl && nameEl.parentElement) {
+      var newSeller = document.createElement('div');
+      newSeller.className = 'file-seller';
+      newSeller.title = f.sellerName || '';
+      newSeller.innerHTML = sb;
+      nameEl.parentElement.insertBefore(newSeller, nameEl.nextSibling);
+    }
   }
   // Update per-file OCR button state
   var ocrBtn = items[idx].querySelector('.ocr-btn');
@@ -807,10 +822,14 @@ function loadFileFromDataUrlFast(fd) {
             // PDF text layer extraction (~5ms, no OCR needed, lightweight builds too)
             results.forEach(function(r) {
               invoke('extract_pdf_text', {
-                pdfPath: r.pdfPath,
-                pageIdx: r.pdfPageIdx
+                pdfPath: r._pdfPath,
+                pageIdx: r._pdfPageIdx
               }).then(function(pdfText) {
-                if (pdfText) applyPdfTextResult(r, pdfText);
+                if (pdfText) {
+                  applyPdfTextResult(r, pdfText);
+                  updateFileItem(r);
+                  updateAmountSummary();
+                }
               }).catch(function(err) {
                 console.warn('[PDF文字提取] 失败，将回退OCR:', err);
               });
@@ -1635,10 +1654,14 @@ function updatePrintBtn() { document.getElementById('printBtn').disabled = !S.fi
 function togglePref(k, btn) {
   S.feat[k] = !S.feat[k];
   btn.classList.toggle('on', S.feat[k]);
-  // Persist OCR enabled setting
   if (k === 'ocrEnabled') {
     try { localStorage.setItem('fapiao-ocr-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
   }
+}
+
+function setOcrPrecision(val) {
+  S.ocrPrecision = val;
+  try { localStorage.setItem('fapiao-ocr-precision', val); } catch(e) {}
 }
 
 function getSaveDir() {
@@ -1680,7 +1703,7 @@ function applyTheme() {
 }
 
 function exportSettings() {
-  var data = { layout: S.layout, feat: S.feat, paperSize: document.getElementById('paperSize').value, orientation: document.getElementById('orientation').value, copies: document.getElementById('copies').value, colorMode: document.getElementById('colorMode').value, printMode: document.getElementById('printMode').value, saveDir: getSaveDir() };
+  var data = { layout: S.layout, feat: S.feat, ocrPrecision: S.ocrPrecision, paperSize: document.getElementById('paperSize').value, orientation: document.getElementById('orientation').value, copies: document.getElementById('copies').value, colorMode: document.getElementById('colorMode').value, printMode: document.getElementById('printMode').value, saveDir: getSaveDir() };
   var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = '发票打印设置.json'; a.click();
@@ -1691,6 +1714,7 @@ function resetSettings() {
   if (!confirm('确认恢复所有默认设置？')) return;
   S.layout = { cols: 1, rows: 1 };
   S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false };
+  S.ocrPrecision = 'standard';
   S.viewZoom = 0;
   document.getElementById('paperSize').value = 'A4';
   document.getElementById('orientation').value = 'landscape';
@@ -1723,6 +1747,7 @@ function resetSettings() {
   document.getElementById('toggleConfirm').classList.add('on');
   document.getElementById('toggleAutoOpenPdf').classList.add('on');
   document.getElementById('toggleOcrEnabled').classList.remove('on');
+  document.getElementById('ocrPrecision').value = 'standard';
   document.getElementById('printMode').value = 'dialog';
   document.getElementById('themeMode').value = 'light';
   document.documentElement.classList.remove('dark');
@@ -1730,6 +1755,7 @@ function resetSettings() {
   try { localStorage.removeItem('fapiao-save-dir'); } catch(e) {}
   try { localStorage.removeItem('fapiao-amt-mode'); } catch(e) {}
   try { localStorage.removeItem('fapiao-ocr-enabled'); } catch(e) {}
+  try { localStorage.removeItem('fapiao-ocr-precision'); } catch(e) {}
   document.getElementById('saveDir').value = '';
   document.getElementById('amtMode').value = 'tax';
   S.amtMode = 'tax';
@@ -1895,6 +1921,17 @@ document.getElementById('orientation').value = 'landscape';
     if (v === '1') {
       S.feat.ocrEnabled = true;
       document.getElementById('toggleOcrEnabled').classList.add('on');
+    }
+  } catch(e) {}
+})();
+
+// Restore OCR precision setting
+(function() {
+  try {
+    var p = localStorage.getItem('fapiao-ocr-precision');
+    if (p && (p === 'fast' || p === 'standard' || p === 'precise')) {
+      S.ocrPrecision = p;
+      document.getElementById('ocrPrecision').value = p;
     }
   } catch(e) {}
 })();
