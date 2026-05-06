@@ -1646,27 +1646,32 @@ fn decode_bytes_with_encoding(
 
 /// Group words into lines based on y-coordinate proximity.
 /// Words on the same line (within half a font-size vertical distance) are grouped together.
+/// Adjacent words on the same line with very small gaps (<3px) are merged to fix
+/// PDF text fragmentation (e.g., "¥" + "4500.00" → "¥4500.00").
 fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLine> {
     if words.is_empty() {
         return Vec::new();
     }
 
-    // Sort by y first (top-to-bottom), then by x (left-to-right) within same y band.
-    // Must use a total order — the previous conditional comparison violated transitivity:
-    // when dy was small it compared by x, otherwise by y, which can produce inconsistent
-    // orderings (A<B by x, B<C by y, but C<A by x → not transitive → panic).
+    // Compute a FIXED band size from median word height.
+    // The previous approach used (a.h + b.h) * 0.25 which depends on BOTH elements
+    // being compared — this violates transitivity and causes Rust's sort_by to panic
+    // with "user-provided comparison function does not correctly implement a total order".
+    let median_h = {
+        let mut heights: Vec<f64> = words.iter().map(|w| w.h).collect();
+        heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = heights.len() / 2;
+        if heights.len() > 0 { heights[mid] } else { 10.0 }
+    };
+    let band = if median_h > 0.5 { median_h * 0.5 } else { 1.0 }; // min band = 1px
+
+    // Sort by y-band first, then by x within same band — using fixed band size
     let mut sorted: Vec<&PdfTextWord> = words.iter().collect();
     sorted.sort_by(|a, b| {
-        // Group words into y-bands: round y to nearest half-line-height for stable grouping.
-        // Use the average height as band size to handle mixed font sizes.
-        let avg_h = (a.h + b.h) * 0.5;
-        let band = if avg_h > 0.5 { avg_h * 0.5 } else { 1.0 }; // min band = 1px
-        // Use total_cmp for f64 to guarantee total order (handles NaN safely)
         let band_a = (a.y / band).round();
         let band_b = (b.y / band).round();
-        band_a.total_cmp(&band_b).then_with(|| {
-            a.x.total_cmp(&b.x)
-        })
+        band_a.partial_cmp(&band_b).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
     });
 
     let mut lines: Vec<PdfTextLine> = Vec::new();
@@ -1682,7 +1687,9 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
             // Finish current line
             if !current_words.is_empty() {
                 // Sort words within line by x position
-                current_words.sort_by(|a, b| a.x.total_cmp(&b.x));
+                current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+                // Merge adjacent words with very small gaps (<3px)
+                current_words = merge_adjacent_words(&current_words);
                 lines.push(PdfTextLine {
                     words: current_words.clone(),
                     confidence: 1.0,
@@ -1698,7 +1705,8 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
 
     // Don't forget the last line
     if !current_words.is_empty() {
-        current_words.sort_by(|a, b| a.x.total_cmp(&b.x));
+        current_words.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        current_words = merge_adjacent_words(&current_words);
         lines.push(PdfTextLine {
             words: current_words,
             confidence: 1.0,
@@ -1706,6 +1714,41 @@ fn group_words_into_lines(words: &[PdfTextWord], _page_h: f64) -> Vec<PdfTextLin
     }
 
     lines
+}
+
+/// Merge adjacent words on the same line that have a very small gap (<3px).
+/// PDF text extraction often fragments text: "¥" and "4500.00" as separate Tj operations,
+/// or single CJK characters that should form one word ("合"+"计").
+/// Merging them restores the semantic word boundaries that the original PDF intended.
+fn merge_adjacent_words(words: &[PdfTextWord]) -> Vec<PdfTextWord> {
+    if words.len() <= 1 {
+        return words.to_vec();
+    }
+    let max_gap = 3.0; // pixels — only merge touching/nearly-touching words
+    let mut result: Vec<PdfTextWord> = Vec::new();
+    let mut buf = words[0].clone();
+
+    for i in 1..words.len() {
+        let next = &words[i];
+        let gap = next.x - (buf.x + buf.w); // distance from right edge of buf to left edge of next
+        if gap >= 0.0 && gap <= max_gap {
+            // Small positive gap — merge: extend buf to include next
+            buf.text.push_str(&next.text);
+            buf.w = (next.x + next.w) - buf.x; // new width spans both
+            if next.h > buf.h { buf.h = next.h; }
+        } else if gap < 0.0 && gap >= -max_gap {
+            // Slight overlap (from approximate text widths) — also merge
+            buf.text.push_str(&next.text);
+            buf.w = buf.w.max(next.x + next.w - buf.x); // take the larger extent
+            if next.h > buf.h { buf.h = next.h; }
+        } else {
+            // Gap too large or overlap too large — flush buf
+            result.push(buf);
+            buf = next.clone();
+        }
+    }
+    result.push(buf);
+    result
 }
 
 // =====================================================
