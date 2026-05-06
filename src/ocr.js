@@ -322,6 +322,24 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
   try {
     // PdfTextResult lines use {words: [{text,x,y,w,h}], confidence: 1.0}
     // This is compatible with OcrLine structure expected by extractByCoordinates
+
+    // 调试：查看原始文本内容
+    console.log('[PDF文字提取] 原始文本内容:', pdfTextResult.text);
+    var allWords = [];
+    var amountWords = [];
+    pdfTextResult.lines.forEach(function(line, lineIdx) {
+      if (line.words && line.words.length > 0) {
+        line.words.forEach(function(word, wordIdx) {
+          allWords.push(word.text);
+          if (/\d+\.\d/.test(word.text) || /¥/.test(word.text)) {
+            amountWords.push({ text: word.text, x: Math.round(word.x), y: Math.round(word.y), w: Math.round(word.w), h: Math.round(word.h) });
+          }
+        });
+      }
+    });
+    console.log('[PDF文字提取] 词列表:', allWords);
+    console.log('[PDF文字提取] 金额词:', amountWords);
+
     var info = extractByCoordinates(pdfTextResult);
 
     console.log('[PDF文字提取] 字段:', {
@@ -520,11 +538,291 @@ function _cleanName(raw) {
   name = name.replace(/[，,。.、：:；;！!？?\s]+$/, '');
   // Remove leading whitespace/colons
   name = name.replace(/^[\s:：]+/, '');
-  // Skip if it's a label itself
+  // Skip if it's a label itself or non-company text
   if (/^(?:购买方信息|销售方信息|购买方|销售方|名称|信息|纳税人|地址|电话|开户行|账号|项目名称|规格型号)$/.test(name)) return '';
+  // Skip invoice type labels and total amount labels
+  if (/^(?:电子发票|增值税专用发票|价税合计|小写|大写)$/.test(name)) return '';
+  if (/电子发票.*增值税专用发票/.test(name)) return '';
+  if (/价税合计.*大写/.test(name)) return '';
   // Must contain CJK and be at least 2 chars
   if (name.length < 2 || !/[\u4e00-\u9fff]/.test(name)) return '';
   return name;
+}
+
+/**
+ * Extract buyer/seller names when label and value are on separate lines.
+ * This handles PDFs where text extraction puts labels and values in different blocks.
+ * Strategy: Find "名称：" labels, then look at the NEXT non-empty line for the actual value.
+ * Use credit code positions to determine which name belongs to buyer vs seller.
+ */
+function _extractNamesCrossLine(text, result) {
+  var lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+
+  // Find all "名称：" positions
+  var nameLabels = [];
+  for (var i = 0; i < lines.length; i++) {
+    if (/^名\s*称[:：]?$/.test(lines[i])) {
+      nameLabels.push(i);
+    }
+  }
+
+  // Find all potential company names (Chinese strings of reasonable length)
+  var potentialNames = [];
+  var companyNameRegex = /^[\u4e00-\u9fa5][\u4e00-\u9fa50-9a-zA-Z（）()·\-\.]{2,50}$/;
+  for (var i = 0; i < lines.length; i++) {
+    if (companyNameRegex.test(lines[i])) {
+      var cleaned = _cleanName(lines[i]);
+      if (cleaned) {
+        potentialNames.push({ line: i, name: cleaned });
+      }
+    }
+  }
+
+  // Strategy 1: Label and value on adjacent lines (original logic)
+  var nameEntries = [];
+  for (var i = 0; i < nameLabels.length; i++) {
+    var labelLine = nameLabels[i];
+    if (labelLine + 1 < lines.length) {
+      var nextLine = lines[labelLine + 1];
+      if (nextLine && !/^名\s*称[:：]?$/.test(nextLine) && !/^[\s:：]*$/.test(nextLine)) {
+        var cleaned = _cleanName(nextLine);
+        if (cleaned) {
+          nameEntries.push({ labelLine: labelLine, valueLine: labelLine + 1, name: cleaned });
+        }
+      }
+    }
+  }
+
+  // Strategy 2: If no adjacent matches, match labels with potential names by position
+  // Labels are usually at the top, names are usually after labels
+  if (nameEntries.length === 0 && nameLabels.length > 0 && potentialNames.length > 0) {
+    // Sort potential names by line number (top to bottom)
+    potentialNames.sort(function(a, b) { return a.line - b.line; });
+    
+    // Match labels to names (first label -> first name, second label -> second name)
+    for (var i = 0; i < Math.min(nameLabels.length, potentialNames.length); i++) {
+      nameEntries.push({ 
+        labelLine: nameLabels[i], 
+        valueLine: potentialNames[i].line, 
+        name: potentialNames[i].name 
+      });
+    }
+  }
+
+  if (nameEntries.length === 0) return;
+
+  // Find credit code positions to anchor buyer/seller determination
+  var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
+  var codes = [];
+  var cm;
+  while ((cm = ccRegex.exec(text)) !== null) {
+    var code = cm[1].toUpperCase();
+    if (codes.indexOf(code) < 0) codes.push(code);
+  }
+
+  // Assign names based on position relative to credit codes
+  // Standard layout: buyer info first (top), seller info second (bottom)
+  if (nameEntries.length >= 2 && codes.length >= 2) {
+    // Two names and two codes: first name = buyer, second name = seller
+    if (!result.buyerName) result.buyerName = nameEntries[0].name;
+    if (!result.sellerName) result.sellerName = nameEntries[1].name;
+  } else if (nameEntries.length >= 2) {
+    // Two names but unknown codes: assume first = buyer, second = seller
+    if (!result.buyerName) result.buyerName = nameEntries[0].name;
+    if (!result.sellerName) result.sellerName = nameEntries[1].name;
+  } else if (nameEntries.length === 1) {
+    // Only one name found: could be seller if we already have buyer credit code
+    // or buyer if we have no other info
+    if (!result.buyerName && !result.sellerName) {
+      // No names yet: assign as buyer (conservative)
+      result.buyerName = nameEntries[0].name;
+    } else if (!result.sellerName) {
+      // Have buyer but no seller: assign as seller
+      result.sellerName = nameEntries[0].name;
+    }
+  }
+}
+
+/**
+ * Find a value word near a label word using coordinates.
+ * Strategy: Look for valuePattern-matching words that are:
+ *   1. To the right of the label (horizontal layout), or
+ *   2. Below the label (vertical layout, within reasonable distance)
+ * Returns the matched text or empty string.
+ */
+function _findValueByLabelCoords(words, labelPattern, valuePattern) {
+  if (!words || words.length === 0) return '';
+
+  // Find all label words - match partial text too (for multi-character labels that may be split)
+  var labelWords = words.filter(function(w) {
+    return labelPattern.test(w.text) || labelPattern.test(w.normText);
+  });
+  if (labelWords.length === 0) return '';
+
+  // For each label, find nearby value words
+  for (var li = 0; li < labelWords.length; li++) {
+    var label = labelWords[li];
+    var candidates = [];
+
+    for (var wi = 0; wi < words.length; wi++) {
+      var w = words[wi];
+      if (w === label) continue;
+      // Match both original text and normalized text
+      if (!valuePattern.test(w.text) && !valuePattern.test(w.normText)) continue;
+
+      var dx = w.cx - label.cx;
+      var dy = w.cy - label.cy;
+      var adx = Math.abs(dx);
+      var ady = Math.abs(dy);
+
+      // Horizontal layout: value is to the right, on same line or adjacent line
+      // Relaxed y threshold (20px) to handle PDFs where label and value are
+      // in separate text blocks with slight vertical offset (e.g., 8.6px)
+      var isHorizontal = dx > 0 && adx < 350 && ady < 20;
+      // Vertical layout: value is below, within reasonable distance
+      var isVertical = dy > 0 && dy < 100 && adx < 80;
+
+      if (isHorizontal || isVertical) {
+        // Score by distance (prefer closer)
+        var score = Math.sqrt(adx * adx + ady * ady);
+        candidates.push({ word: w, score: score });
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort(function(a, b) { return a.score - b.score; });
+      return candidates[0].word.text;
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Collect words in a rectangular region defined by normalized coordinates.
+ * Returns words sorted by y (top-to-bottom), then x (left-to-right).
+ */
+function _collectWordsInRegion(words, nxMin, nxMax, nyMin, nyMax) {
+  var found = [];
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i];
+    if (w.nx >= nxMin && w.nx <= nxMax && w.ny >= nyMin && w.ny <= nyMax) {
+      found.push(w);
+    }
+  }
+  found.sort(function(a, b) {
+    var yDiff = a.y - b.y;
+    if (Math.abs(yDiff) > (a.h + b.h) * 0.3) return yDiff < 0 ? -1 : 1;
+    return a.x - b.x;
+  });
+  return found;
+}
+
+/**
+ * Join words into a text string, grouping by line proximity.
+ * Words on the same y-band are joined without separator;
+ * words on different y-bands are joined with newline.
+ */
+function _joinWordsByLine(words) {
+  if (words.length === 0) return '';
+  var lines = [];
+  var curLine = [words[0]];
+  var curY = words[0].y;
+  var curH = words[0].h;
+  for (var i = 1; i < words.length; i++) {
+    var w = words[i];
+    if (Math.abs(w.y - curY) <= curH * 0.6) {
+      curLine.push(w);
+    } else {
+      curLine.sort(function(a, b) { return a.x - b.x; });
+      lines.push(curLine.map(function(w) { return w.text; }).join(''));
+      curLine = [w];
+      curY = w.y;
+      curH = w.h;
+    }
+  }
+  if (curLine.length > 0) {
+    curLine.sort(function(a, b) { return a.x - b.x; });
+    lines.push(curLine.map(function(w) { return w.text; }).join(''));
+  }
+  return lines.join('');
+}
+
+/**
+ * Extract buyer/seller names using coordinate-based region matching.
+ * Strategy: Find "名称" label positions, then collect all words in the
+ * region to the right of each label (and slightly below for multi-line names).
+ * Use "统一社会信用代码" label as a boundary to avoid over-collection.
+ * No company keyword filtering — relies purely on spatial positioning.
+ */
+function _extractNamesByCoords(words, result) {
+  if (!words || words.length === 0) return;
+
+  var nameLabels = words.filter(function(w) {
+    return /^名\s*称[:：]?$/.test(w.text) || /^名\s*称[:：]?$/.test(w.normText);
+  });
+  if (nameLabels.length === 0) return;
+
+  var creditLabels = words.filter(function(w) {
+    return /统一社会信用代码|纳税人识别号/.test(w.text) || /统一社会信用代码|纳税人识别号/.test(w.normText);
+  });
+
+  var foundNames = [];
+  for (var li = 0; li < nameLabels.length; li++) {
+    var label = nameLabels[li];
+    var labelRight = label.x + label.w;
+    var labelBottom = label.y + label.h;
+    var lineH = label.h;
+
+    var regionWords = [];
+    for (var wi = 0; wi < words.length; wi++) {
+      var w = words[wi];
+      if (w === label) continue;
+
+      var isRightOfLabel = w.x >= label.x - lineH * 0.3;
+      var isBelowOrSameLine = w.y >= label.y - lineH * 0.3 && w.y < labelBottom + lineH * 3;
+      var isNotLabel = !/^名\s*称[:：]?$/.test(w.text) && !/^名\s*称[:：]?$/.test(w.normText);
+      var isNotCreditLabel = !/统一社会信用代码|纳税人识别号/.test(w.text) && !/统一社会信用代码|纳税人识别号/.test(w.normText);
+      var isNotSectionLabel = !/^(?:购\s*买|销\s*售|信\s*息)$/.test(w.text) && !/^(?:购\s*买|销\s*售|信\s*息)$/.test(w.normText);
+
+      if (isRightOfLabel && isBelowOrSameLine && isNotLabel && isNotCreditLabel && isNotSectionLabel) {
+        var blockedByCredit = false;
+        for (var ci = 0; ci < creditLabels.length; ci++) {
+          var cl = creditLabels[ci];
+          if (Math.abs(cl.ny - label.ny) < 0.15 && w.y >= cl.y - lineH * 0.3) {
+            blockedByCredit = true;
+            break;
+          }
+        }
+        if (!blockedByCredit) {
+          regionWords.push(w);
+        }
+      }
+    }
+
+    if (regionWords.length === 0) continue;
+
+    var nameText = _joinWordsByLine(regionWords);
+    var cleaned = _cleanName(nameText);
+    if (cleaned) {
+      foundNames.push({ label: label, name: cleaned, ny: label.ny, nx: label.nx });
+    }
+  }
+
+  if (foundNames.length === 0) return;
+
+  foundNames.sort(function(a, b) { return a.ny - b.ny || a.nx - b.nx; });
+
+  if (foundNames.length >= 2) {
+    if (!result.buyerName) result.buyerName = foundNames[0].name;
+    if (!result.sellerName) result.sellerName = foundNames[1].name;
+  } else if (foundNames.length === 1) {
+    if (foundNames[0].nx < 0.5) {
+      if (!result.buyerName) result.buyerName = foundNames[0].name;
+    } else {
+      if (!result.sellerName) result.sellerName = foundNames[0].name;
+    }
+  }
 }
 
 /**
@@ -540,9 +838,14 @@ function _cleanName(raw) {
  *   统一社会信用代码/纳税人识别号：913202001358946118  ← 购买方 (1st)
  *   统一社会信用代码/纳税人识别号：913202057431110944  ← 销售方 (2nd)
  *
- * Returns: { invoiceNo, invoiceDate, buyerName, sellerName, buyerCreditCode, sellerCreditCode }
+ * NEW: Also supports coordinate-based extraction for PDFs where labels and values
+ * are in separate text blocks but positioned adjacent to each other.
+ *
+ * @param {string} fullText - The full OCR text
+ * @param {Array} [words] - Optional array of word objects with {text, x, y, w, h, nx, ny}
+ * @returns {Object} { invoiceNo, invoiceDate, buyerName, sellerName, buyerCreditCode, sellerCreditCode }
  */
-function _extractByText(fullText) {
+function _extractByText(fullText, words) {
   var result = {
     invoiceNo: '',
     invoiceDate: '',
@@ -556,19 +859,59 @@ function _extractByText(fullText) {
   var text = _normTextForExtract(fullText);
 
   // --- Invoice number ---
+  // Pattern 1: Same line (standard format)
   var noMatch = text.match(/发\s*票\s*号\s*码[:\s]*(\d{8,20})/);
   if (noMatch) result.invoiceNo = noMatch[1];
+  // Pattern 2: Cross-line (label and value on separate lines)
+  // e.g., "发票号码：\n25322000000337005189"
+  if (!result.invoiceNo) {
+    var noCrossMatch = text.match(/发\s*票\s*号\s*码[:：\s]*\n\s*(\d{8,20})/);
+    if (noCrossMatch) result.invoiceNo = noCrossMatch[1];
+  }
+  // Pattern 3: Loose cross-line (label and value separated by multiple lines)
+  // e.g., "发票号码：\n...\n25322000000337005189"
+  if (!result.invoiceNo) {
+    var noLooseMatch = text.match(/发\s*票\s*号\s*码[:：][\s\S]*?(\d{8,20})/);
+    if (noLooseMatch) result.invoiceNo = noLooseMatch[1];
+  }
+  // Pattern 4: Coordinate-based (for PDFs with label/value in separate blocks)
+  if (!result.invoiceNo && words && words.length > 0) {
+    result.invoiceNo = _findValueByLabelCoords(words, /发\s*票\s*号\s*码/, /\d{8,20}/);
+  }
 
   // --- Invoice date ---
+  // Pattern 1: Same line (standard format)
   var dateMatch = text.match(/开\s*票\s*日\s*期[:\s]*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   if (dateMatch) {
     result.invoiceDate = dateMatch[1] + '-' +
       dateMatch[2].padStart(2, '0') + '-' +
       dateMatch[3].padStart(2, '0');
   }
+  // Pattern 2: Cross-line (label and value on separate lines)
+  // e.g., "开票日期：\n2025年07月22日"
+  if (!result.invoiceDate) {
+    var dateCrossMatch = text.match(/开\s*票\s*日\s*期[:：\s]*\n\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    if (dateCrossMatch) {
+      result.invoiceDate = dateCrossMatch[1] + '-' +
+        dateCrossMatch[2].padStart(2, '0') + '-' +
+        dateCrossMatch[3].padStart(2, '0');
+    }
+  }
+  // Pattern 3: Coordinate-based (for PDFs with label/value in separate blocks)
+  if (!result.invoiceDate && words && words.length > 0) {
+    var dateStr = _findValueByLabelCoords(words, /开\s*票\s*日\s*期/, /\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/);
+    if (dateStr) {
+      var dateParts = dateStr.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+      if (dateParts) {
+        result.invoiceDate = dateParts[1] + '-' +
+          dateParts[2].padStart(2, '0') + '-' +
+          dateParts[3].padStart(2, '0');
+      }
+    }
+  }
 
   // --- Buyer/Seller names ---
-  // Priority 1: Explicit labels "购买方名称：" / "销售方名称："
+  // Priority 1: Explicit labels "购买方名称：" / "销售方名称：" (same line)
   var buyerLabelMatch = text.match(/购\s*买\s*方(?:信息)?名\s*称[:\s]*([^\n]+)/);
   if (buyerLabelMatch) {
     var bn = _cleanName(buyerLabelMatch[1]);
@@ -578,6 +921,15 @@ function _extractByText(fullText) {
   if (sellerLabelMatch) {
     var sn = _cleanName(sellerLabelMatch[1]);
     if (sn) result.sellerName = sn;
+  }
+  // Priority 1b: Cross-line format (label and value on separate lines)
+  // e.g., "购买方信息\n...\n名称：\n无锡天鹏菜篮子工程有限公司"
+  if (!result.buyerName || !result.sellerName) {
+    _extractNamesCrossLine(text, result);
+  }
+  // Priority 1c: Coordinate-based (for PDFs with label/value in separate blocks)
+  if ((!result.buyerName || !result.sellerName) && words && words.length > 0) {
+    _extractNamesByCoords(words, result);
   }
 
   // --- Buyer/Seller credit codes (extract FIRST — use as anchor for name matching) ---
@@ -1198,7 +1550,8 @@ function extractByCoordinates(ocrResult) {
 
   // --- Text-based extraction (PRIMARY for structured fields) ---
   // OCR text is well-formatted with clear key-value pairs — leverage this first
-  var textInfo = _extractByText(fullText);
+  // Pass words for coordinate-based fallback (handles PDFs with label/value in separate blocks)
+  var textInfo = _extractByText(fullText, words);
   var invoiceNo = textInfo.invoiceNo;
   var invoiceDate = textInfo.invoiceDate;
   var buyerName = textInfo.buyerName;
@@ -1284,20 +1637,24 @@ function extractByCoordinates(ocrResult) {
   var textAmounts = _extractAmountsByText(fullText);
   if (textAmounts.amountTax > 0) amountTax = textAmounts.amountTax;
   if (textAmounts.amountNoTax > 0) amountNoTax = textAmounts.amountNoTax;
-  // Track whether taxAmount was resolved by text extraction — 0 is a valid value
-  // (e.g., tax-exempt invoices). Without this flag, !taxAmount treats 0 as "not found"
-  // and coordinate-based fallback would overwrite it with a wrong amount.
   var _taxAmountResolved = false;
   if (textAmounts.taxAmount > 0) {
     taxAmount = textAmounts.taxAmount;
     _taxAmountResolved = true;
   } else if (textAmounts.amountNoTax > 0 && textAmounts.amountTax > 0 &&
              Math.abs(textAmounts.amountTax - textAmounts.amountNoTax) < 0.02) {
-    // amountNoTax == amountTax implies taxAmount = 0 (tax-exempt invoice)
     taxAmount = 0;
     _taxAmountResolved = true;
   }
   console.log('[文本提取] 金额:', textAmounts);
+
+  // Validate text-extracted amountTax: if no math-verified pair was found,
+  // the amountTax is likely wrong (e.g., matched a unit price or tax rate).
+  // Reset it so coordinate-based fallback can try.
+  if (amountTax > 0 && !_taxAmountResolved && amountNoTax === 0) {
+    console.log('[文本提取] 含税价未验证(无配对), 重置为0以触发坐标提取');
+    amountTax = 0;
+  }
 
   // --- Amount extraction (coordinate-based FALLBACK) ---
   // Only runs when text-based extraction didn't find the amounts.

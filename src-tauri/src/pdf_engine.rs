@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Read;
 use ab_glyph::{Font as AbFont, Glyph, ScaleFont};
 
 /// Rendering DPI — must match frontend PDF_RENDER_DPI constant
@@ -1098,17 +1099,79 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
     let page_w_px = (page_w_pt as f64 * scale) as u32;
     let page_h_px = (page_h_pt as f64 * scale) as u32;
 
-    // Get font encodings for text decoding
+    // Get font encodings and ToUnicode CMaps for text decoding
     let fonts = doc.get_page_fonts(page_id).unwrap_or_default();
-    let encodings: std::collections::BTreeMap<Vec<u8>, lopdf::Encoding> = fonts
-        .into_iter()
-        .filter_map(|(name, font_dict)| {
-            match font_dict.get_font_encoding(&doc) {
-                Ok(enc) => Some((name, enc)),
-                Err(_) => None,
+    let mut encodings: std::collections::BTreeMap<Vec<u8>, lopdf::Encoding> = std::collections::BTreeMap::new();
+    let mut tounicode_cmaps: std::collections::BTreeMap<Vec<u8>, CMap> = std::collections::BTreeMap::new();
+    
+    for (name, font_dict) in fonts {
+        // Get font encoding
+        if let Ok(enc) = font_dict.get_font_encoding(&doc) {
+            encodings.insert(name.clone(), enc);
+        }
+        
+        // Get ToUnicode CMap if available
+        if let Ok(tounicode) = font_dict.get(b"ToUnicode") {
+            if let lopdf::Object::Reference(xref) = tounicode {
+                if let Ok(obj) = doc.get_object(*xref) {
+                    if let Ok(stream) = obj.as_stream() {
+                        let content_bytes = stream.content.as_slice();
+                        
+                        // Try to decompress if it looks like compressed data (zlib header)
+                        let cmap_bytes = if content_bytes.starts_with(&[0x78, 0x01]) || 
+                                           content_bytes.starts_with(&[0x78, 0x9C]) || 
+                                           content_bytes.starts_with(&[0x78, 0xDA]) {
+                            eprintln!("[DEBUG] Attempting zlib decompression");
+                            match flate2::read::ZlibDecoder::new(content_bytes).bytes().collect::<Result<Vec<_>, _>>() {
+                                Ok(decompressed) => {
+                                    eprintln!("[DEBUG] Decompression successful, length: {}", decompressed.len());
+                                    decompressed
+                                }
+                                Err(e) => {
+                                    eprintln!("[DEBUG] Zlib decompression failed: {}", e);
+                                    content_bytes.to_vec()
+                                }
+                            }
+                        } else {
+                            content_bytes.to_vec()
+                        };
+                        
+                        // Debug: print first 200 chars of CMap content
+                        let debug_preview: String = cmap_bytes.iter()
+                            .take(200)
+                            .map(|&b| if b >= 32 && b < 127 { b as char } else { '?' })
+                            .collect();
+                        eprintln!("[DEBUG] CMap content preview: {}", debug_preview);
+                        
+                        // Try UTF-8 first
+                        if let Ok(content) = String::from_utf8(cmap_bytes.clone()) {
+                            eprintln!("[DEBUG] UTF-8 decode success, length: {}", content.len());
+                            if let Some(cmap) = parse_cmap(&content) {
+                                eprintln!("[DEBUG] CMap parsed successfully, mappings: {}", cmap.mappings.len());
+                                tounicode_cmaps.insert(name.clone(), cmap);
+                                continue;
+                            } else {
+                                eprintln!("[DEBUG] CMap parse failed for UTF-8");
+                            }
+                        } else {
+                            eprintln!("[DEBUG] UTF-8 decode failed");
+                        }
+                        // Try Latin-1 as fallback
+                        let content = String::from_utf8_lossy(&cmap_bytes);
+                        if let Some(cmap) = parse_cmap(&content) {
+                            eprintln!("[DEBUG] CMap parsed successfully from Latin-1");
+                            tounicode_cmaps.insert(name.clone(), cmap);
+                        } else {
+                            eprintln!("[DEBUG] CMap parse failed for Latin-1");
+                        }
+                    }
+                }
             }
-        })
-        .collect();
+        }
+    }
+    
+    // Debug: log CMap parsing status
+    eprintln!("[DEBUG] Loaded {} ToUnicode CMaps", tounicode_cmaps.len());
 
     // Decode page content stream
     let content = doc.get_and_decode_page_content(page_id)
@@ -1238,7 +1301,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
             "Tj" if in_text_block => {
                 // Show text string
                 if let Some(obj) = op.operands.first() {
-                    if let Some(decoded) = decode_text_object(obj, &encodings, &current_font, &doc) {
+                    if let Some(decoded) = decode_text_object(obj, &encodings, &tounicode_cmaps, &current_font) {
                         if !decoded.is_empty() {
                             let word = make_word(&decoded, cur_x, cur_y, font_size, page_h_pt, scale);
                             all_words.push(word);
@@ -1261,7 +1324,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                     for item in arr {
                         match item {
                             Object::String(bytes, _format) => {
-                                if let Some(decoded) = decode_bytes_with_encoding(bytes, &encodings, &current_font, &doc) {
+                                if let Some(decoded) = decode_bytes_with_encoding(bytes, &encodings, &tounicode_cmaps, &current_font) {
                                     text_buf.push_str(&decoded);
                                 }
                             }
@@ -1374,19 +1437,19 @@ fn is_cjk(ch: char) -> bool {
 fn decode_text_object(
     obj: &lopdf::Object,
     encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
+    cmaps: &std::collections::BTreeMap<Vec<u8>, CMap>,
     font_name: &[u8],
-    pdf_doc: &lopdf::Document,
 ) -> Option<String> {
     match obj {
         lopdf::Object::String(bytes, _format) => {
-            decode_bytes_with_encoding(bytes, encodings, font_name, pdf_doc)
+            decode_bytes_with_encoding(bytes, encodings, cmaps, font_name)
         }
         lopdf::Object::Array(arr) => {
             // Some PDFs use arrays in Tj
             let mut result = String::new();
             for item in arr {
                 if let lopdf::Object::String(bytes, _fmt) = item {
-                    if let Some(decoded) = decode_bytes_with_encoding(bytes, encodings, font_name, pdf_doc) {
+                    if let Some(decoded) = decode_bytes_with_encoding(bytes, encodings, cmaps, font_name) {
                         result.push_str(&decoded);
                     }
                 }
@@ -1397,17 +1460,147 @@ fn decode_text_object(
     }
 }
 
+/// Simple CMap parser for ToUnicode mappings
+#[derive(Clone)]
+struct CMap {
+    mappings: std::collections::BTreeMap<u16, char>,
+    ranges: Vec<(u16, u16, u16)>, // (start, end, unicode_start)
+}
+
+impl CMap {
+    fn new() -> Self {
+        CMap {
+            mappings: std::collections::BTreeMap::new(),
+            ranges: Vec::new(),
+        }
+    }
+    
+    fn add_mapping(&mut self, glyph: u16, ch: char) {
+        self.mappings.insert(glyph, ch);
+    }
+    
+    fn add_range(&mut self, start: u16, end: u16, unicode_start: u16) {
+        self.ranges.push((start, end, unicode_start));
+    }
+    
+    fn lookup(&self, glyph: u16) -> Option<char> {
+        // Check direct mappings first
+        if let Some(ch) = self.mappings.get(&glyph) {
+            return Some(*ch);
+        }
+        
+        // Check ranges
+        for &(start, end, unicode_start) in &self.ranges {
+            if glyph >= start && glyph <= end {
+                let offset = glyph - start;
+                return std::char::from_u32((unicode_start + offset) as u32);
+            }
+        }
+        
+        None
+    }
+}
+
+/// Parse a ToUnicode CMap string
+fn parse_cmap(content: &str) -> Option<CMap> {
+    let mut cmap = CMap::new();
+    
+    // Split by whitespace (handles all line endings: \n, \r\n, \r)
+    let tokens: Vec<&str> = content.split(|c: char| c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+    let mut i = 0;
+    
+    while i < tokens.len() {
+        let token = tokens[i];
+        
+        // Parse beginbfchar / endbfchar
+        if token == "beginbfchar" {
+            i += 1;
+            while i + 1 < tokens.len() && tokens[i] != "endbfchar" {
+                let glyph_str = tokens[i];
+                let unicode_str = tokens[i + 1];
+                if let (Some(glyph), Some(ch)) = (parse_hex_pair(glyph_str), parse_hex_pair(unicode_str)) {
+                    if let Some(unicode_char) = std::char::from_u32(ch as u32) {
+                        cmap.add_mapping(glyph, unicode_char);
+                    }
+                }
+                i += 2;
+            }
+            i += 1; // Skip "endbfchar"
+        }
+        
+        // Parse beginbfrange / endbfrange
+        else if token == "beginbfrange" {
+            i += 1;
+            while i + 2 < tokens.len() && tokens[i] != "endbfrange" {
+                let start_str = tokens[i];
+                let end_str = tokens[i + 1];
+                let unicode_start_str = tokens[i + 2];
+                if let (Some(start), Some(end), Some(unicode_start)) = 
+                    (parse_hex_pair(start_str), parse_hex_pair(end_str), parse_hex_pair(unicode_start_str)) {
+                    cmap.add_range(start, end, unicode_start);
+                }
+                i += 3;
+            }
+            i += 1; // Skip "endbfrange"
+        }
+        
+        i += 1;
+    }
+    
+    // Debug: log parsing result
+    eprintln!("[DEBUG] CMap parsed: {} mappings, {} ranges", cmap.mappings.len(), cmap.ranges.len());
+    
+    // If we found any mappings, return the CMap
+    if !cmap.mappings.is_empty() || !cmap.ranges.is_empty() {
+        Some(cmap)
+    } else {
+        None
+    }
+}
+
+/// Parse a hex string like "<0041>" to u16
+fn parse_hex_pair(s: &str) -> Option<u16> {
+    let s = s.trim();
+    if s.starts_with('<') && s.ends_with('>') {
+        let hex_str = &s[1..s.len()-1];
+        u16::from_str_radix(hex_str, 16).ok()
+    } else {
+        None
+    }
+}
+
 /// Decode raw bytes using the font's encoding.
 fn decode_bytes_with_encoding(
     bytes: &[u8],
     encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
+    cmaps: &std::collections::BTreeMap<Vec<u8>, CMap>,
     font_name: &[u8],
-    _pdf_doc: &lopdf::Document, // TODO: use for ToUnicode CMap lookup when font Encoding is unavailable
 ) -> Option<String> {
     // Try the font's encoding first
     if let Some(encoding) = encodings.get(font_name) {
         if let Ok(text) = encoding.bytes_to_string(bytes) {
             return Some(text);
+        }
+    }
+
+    // Try ToUnicode CMap lookup for CID-keyed fonts (Identity-H encoding)
+    if let Some(cmap) = cmaps.get(font_name) {
+        let mut result = String::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Identity-H uses 2-byte glyph indices (big-endian)
+            if i + 1 < bytes.len() {
+                let glyph_idx = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
+                if let Some(ch) = cmap.lookup(glyph_idx) {
+                    result.push(ch);
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if !result.is_empty() && result.chars().any(|c| !c.is_control()) {
+            return Some(result);
         }
     }
 
@@ -1422,6 +1615,18 @@ fn decode_bytes_with_encoding(
     if bytes.len() >= 2 && bytes.len() % 2 == 0 {
         let utf16: Vec<u16> = bytes.chunks(2)
             .filter_map(|c| Some(u16::from_be_bytes([*c.get(0)?, *c.get(1)?])))
+            .collect();
+        if let Ok(text) = String::from_utf16(&utf16) {
+            if !text.is_empty() && text.chars().any(|c| !c.is_control()) {
+                return Some(text);
+            }
+        }
+    }
+
+    // Fallback: try UTF-16LE decode (some CIDFonts use this encoding, especially Chinese PDFs)
+    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+        let utf16: Vec<u16> = bytes.chunks(2)
+            .filter_map(|c| Some(u16::from_le_bytes([*c.get(0)?, *c.get(1)?])))
             .collect();
         if let Ok(text) = String::from_utf16(&utf16) {
             if !text.is_empty() && text.chars().any(|c| !c.is_control()) {
