@@ -1262,7 +1262,9 @@ function _extractByText(fullText, words) {
       }
       // Fallback: 2nd "名称" match
       if (!result.sellerName && names.length >= 2) result.sellerName = names[1];
-      else if (!result.sellerName && names.length === 1) result.sellerName = names[0];
+      // When only 1 "名称" match, don't duplicate it as sellerName —
+      // a single "名称" is almost always the buyer, and the seller should be
+      // determined by other means (e.g., ticket type label, ride invoice layout)
     }
   }
 
@@ -2033,14 +2035,26 @@ function extractByCoordinates(ocrResult) {
 
   // === Ticket extraction ===
   if (isTicket) {
-    if (!sellerName) sellerName = getTicketTypeLabel(fullText);
+    // Tickets don't have a traditional seller — override with ticket type label
+    sellerName = getTicketTypeLabel(fullText);
 
-    // Method 1: "票价:" keyword → nearby amount
+    // Method 1: "票价:" keyword → nearby amount or inline amount
     var priceLabels = _findWords(words, /票\s*价/);
     for (var pi = 0; pi < priceLabels.length && !amountTax; pi++) {
-      var amt = _findNearbyAmount(words, priceLabels[pi], { maxDx: 300, maxDy: 30, maxDyBelow: 80 });
-      if (amt && amt.value >= 5 && amt.value <= 5000) {
-        amountTax = amt.value;
+      // Try inline amount first: "票价:￥41.00" or "票价：¥41.00" (keyword+amount in one word)
+      var inlineMatch = priceLabels[pi].text.match(/票\s*价[：:]*\s*[￥¥]\s*(\d+\.\d{2})/);
+      if (inlineMatch) {
+        var inlineVal = parseFloat(inlineMatch[1]);
+        if (inlineVal >= 1 && inlineVal <= 50000) {
+          amountTax = inlineVal;
+        }
+      }
+      // Fallback: nearby separate amount word
+      if (!amountTax) {
+        var amt = _findNearbyAmount(words, priceLabels[pi], { maxDx: 300, maxDy: 30, maxDyBelow: 80 });
+        if (amt && amt.value >= 5 && amt.value <= 5000) {
+          amountTax = amt.value;
+        }
       }
     }
     // "全价"/"优惠价"/"学生价"
@@ -2054,6 +2068,7 @@ function extractByCoordinates(ocrResult) {
       }
     }
     // Method 2: Positional — ¥ amount in ticket area (nx < 0.5, ny 0.35~0.65)
+    // Also handles "票价:￥41.00" style inline amounts (keyword+value in one word)
     if (!amountTax) {
       var ticketAmounts = words.filter(function(w) {
         if (w.confidence < 0.3) return false;
@@ -2072,6 +2087,20 @@ function extractByCoordinates(ocrResult) {
           return vb - va;
         });
         amountTax = parseFloat(ticketAmounts[0].normText.replace(/[,，¥]/g, ''));
+      }
+      // Fallback: inline amount within keyword+value words (e.g., "票价:￥41.00")
+      if (!amountTax) {
+        for (var tai = 0; tai < words.length; tai++) {
+          var tw = words[tai];
+          var inlineTicketMatch = tw.text.match(/(?:票价|全价|优惠价|学生价)[：:]*\s*[￥¥]\s*(\d+\.\d{2})/);
+          if (inlineTicketMatch) {
+            var tv = parseFloat(inlineTicketMatch[1]);
+            if (tv >= 1 && tv <= 50000) {
+              amountTax = tv;
+              break;
+            }
+          }
+        }
       }
     }
     if (amountTax > 0) amountNoTax = amountTax;
