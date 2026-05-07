@@ -1504,20 +1504,38 @@ function _extractAmountsByText(fullText) {
       }
     }
   }
-  // Pattern 2: Find last ¥ amount after "价税合计" or "金额合计" (non-tax invoices)
+  // Pattern 1c: "（小写）" followed by Chinese numeral then ¥ amount
+  // PDF content stream often has "（小写）\n柒万圆整\n¥70000.00" where the Chinese
+  // numeral blocks Pattern 1's \s* from reaching the ¥ amount.
+  // Allow Chinese numeral characters between "小写）" and the ¥ amount.
+  // IMPORTANT: ¥ is REQUIRED (not optional) to avoid matching wrong amounts
+  // when other numbers appear between （小写） and the target amount.
+  if (!result.amountTax) {
+    var xxChinese = text.match(/小\s*写[）\)]*[：:]*[\s零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]*¥\s*(\d[\d,]*\.\d{2})/);
+    if (xxChinese) {
+      var v1c = parseAmt(xxChinese[1]);
+      if (v1c > 10 && !isLikelyYearOrDate(v1c, xxChinese[1])) {
+        result.amountTax = v1c;
+        console.log('[Phase1] Pattern1c匹配含税价(跨中文大写):', xxChinese[1]);
+      }
+    }
+  }
+  // Pattern 2: Find largest ¥ amount after "价税合计" or "金额合计" (non-tax invoices)
+  // IMPORTANT: Use LARGEST, not last — PDF content stream order may differ from visual order,
+  // placing 合计-row ¥ amounts after 含税价 ¥ amount. 含税价 is always the largest (含税=不含税+税额).
   if (!result.amountTax) {
     var jshjIdx = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjIdx >= 0) {
       var afterJshj = text.substring(jshjIdx);
       var jshjAmtRe = /¥\s*(\d[\d,]*\.\d{2})/g;
-      var jm, lastAmt = 0;
+      var jm, maxAmt = 0;
       while ((jm = jshjAmtRe.exec(afterJshj)) !== null) {
         var v2 = parseAmt(jm[1]);
-        if (v2 > 0 && !isLikelyYearOrDate(v2, jm[1])) lastAmt = v2;
+        if (v2 > maxAmt && !isLikelyYearOrDate(v2, jm[1])) maxAmt = v2;
       }
-      if (lastAmt > 0) {
-        result.amountTax = lastAmt;
-        console.log('[Phase1] Pattern2匹配含税价:', lastAmt);
+      if (maxAmt > 0) {
+        result.amountTax = maxAmt;
+        console.log('[Phase1] Pattern2匹配含税价:', maxAmt);
       }
     } else {
       console.log('[Phase1] Pattern2未找到"价税合计"');
