@@ -1164,12 +1164,15 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
         }
     }
 
-    // Step 2: If page-level fonts are empty, look for Form XObjects
-    // and load fonts from their embedded Resources.
-    // Some PDFs (e.g., OFD→PDF by Suwell) put all fonts inside Form XObject resources,
-    // while the page-level Resources only has the XObject reference.
+    // Step 2: Look for Form XObjects and load fonts from their embedded Resources.
+    // IMPORTANT: We must ALWAYS scan Form XObjects, not just when page-level fonts are empty.
+    // Many PDFs (e.g., dzcp-format VAT invoices) have page-level label text (STKaiti fonts for
+    // "名称:", "统一社会信用代码/" etc.) AND Form XObjects containing the actual values
+    // (company names in SimSun, credit codes in CourierNew, amounts, etc.).
+    // If we skip Form XObject font loading when page-level fonts exist, the value text
+    // in Form XObjects can't be decoded and is silently lost.
     let mut form_xobject_ids: Vec<lopdf::ObjectId> = Vec::new();
-    if lopdf_encodings.is_empty() && tounicode_cmaps.is_empty() {
+    {
         if let Ok(page_dict) = doc.get_dictionary(page_id) {
             if let Ok(resources) = page_dict.get(b"Resources") {
                 let resolved_res = match resources {
@@ -1198,6 +1201,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                                             if subtype == Some(b"Form") {
                                                 form_xobject_ids.push(id);
                                                 // Get fonts from Form XObject's Resources
+                                                // Only load fonts that aren't already in the page-level set
                                                 if let Ok(form_res) = stream.dict.get(b"Resources") {
                                                     let resolved_form_res = match form_res {
                                                         lopdf::Object::Reference(rid) => doc.get_dictionary(*rid).ok(),
@@ -1211,6 +1215,10 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                                                             };
                                                             if let Some(fonts_dict) = resolved_fonts {
                                                                 for (fname, fref) in fonts_dict.iter() {
+                                                                    // Skip if this font name is already loaded from page-level
+                                                                    if lopdf_encodings.contains_key(fname) && tounicode_cmaps.contains_key(fname) {
+                                                                        continue;
+                                                                    }
                                                                     let font_dict = match fref {
                                                                         lopdf::Object::Reference(fid) => doc.get_dictionary(*fid).ok(),
                                                                         lopdf::Object::Dictionary(d) => Some(d),
@@ -1221,11 +1229,15 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                                                                         if let Ok(enc_name) = fd.get(b"Encoding").and_then(|e| e.as_name().map(|n| n.to_vec())) {
                                                                             font_encoding_names.insert(fname.clone(), enc_name);
                                                                         }
-                                                                        if let Ok(enc) = fd.get_font_encoding(&doc) {
-                                                                            lopdf_encodings.insert(fname.clone(), enc);
+                                                                        if !lopdf_encodings.contains_key(fname) {
+                                                                            if let Ok(enc) = fd.get_font_encoding(&doc) {
+                                                                                lopdf_encodings.insert(fname.clone(), enc);
+                                                                            }
                                                                         }
-                                                                        if let Some(cmap) = load_cmap_from_font(&doc, fd) {
-                                                                            tounicode_cmaps.insert(fname.clone(), cmap);
+                                                                        if !tounicode_cmaps.contains_key(fname) {
+                                                                            if let Some(cmap) = load_cmap_from_font(&doc, fd) {
+                                                                                tounicode_cmaps.insert(fname.clone(), cmap);
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
@@ -1257,33 +1269,35 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
         lopdf_encodings.len(), tounicode_cmaps.len(), form_xobject_ids.len());
 
     // Get the content stream to parse
-    // If page content only has "Do" (Form XObject invocation), expand the Form XObject content
+    // IMPORTANT: Always expand Form XObject content streams when they exist.
+    // Many PDFs (e.g., dzcp-format invoices) have both page-level label text AND
+    // Form XObjects containing the actual values (company names, amounts, credit codes).
+    // We must append Form XObject text operations AFTER the page-level text operations,
+    // so that both labels and values are extracted.
     let page_content = doc.get_and_decode_page_content(page_id)
         .map_err(|e| format!("PDF内容流解码失败: {}", e))?;
 
-    let has_page_text = page_content.operations.iter().any(|op| {
-        op.operator == "Tj" || op.operator == "TJ"
-    });
-
-    let content = if !has_page_text && !form_xobject_ids.is_empty() {
-        // Page content has no text ops — try to get content from Form XObjects
-        let mut combined_ops: Vec<lopdf::content::Operation> = Vec::new();
+    let content = if !form_xobject_ids.is_empty() {
+        // Append Form XObject text operations to the page-level content
+        let mut combined_ops = page_content.operations.clone();
         for fxobj_id in &form_xobject_ids {
             if let Ok(obj) = doc.get_object(*fxobj_id) {
                 if let Ok(stream) = obj.as_stream() {
                     if let Ok(decompressed) = stream.decompressed_content() {
-                        if let Ok(form_content) = lopdf::content::Content::decode(&decompressed) {
+                        // Fix literal strings in Form XObject content: escape backslash bytes.
+                        // PDF producers sometimes embed raw 0x5C bytes in literal strings without
+                        // proper escaping. lopdf interprets 0x5C as escape start (e.g., \t → TAB),
+                        // which corrupts 2-byte CID alignment for Identity-H encoded fonts.
+                        // Fix: scan the raw bytes and escape any unescaped 0x5C inside literal strings.
+                        let fixed_bytes = escape_backslashes_in_literal_strings(&decompressed);
+                        if let Ok(form_content) = lopdf::content::Content::decode(&fixed_bytes) {
                             combined_ops.extend(form_content.operations);
                         }
                     }
                 }
             }
         }
-        if combined_ops.is_empty() {
-            page_content
-        } else {
-            lopdf::content::Content { operations: combined_ops }
-        }
+        lopdf::content::Content { operations: combined_ops }
     } else {
         page_content
     };
@@ -1620,6 +1634,90 @@ impl CMap {
         
         None
     }
+}
+
+/// Escape raw backslash bytes (0x5C) inside PDF literal strings to prevent
+/// lopdf's escape processing from corrupting 2-byte CID alignment.
+///
+/// Some PDF producers (e.g., dzcp-format invoices) embed raw 0x5C bytes in
+/// literal strings without proper PDF escaping. When lopdf parses these strings,
+/// it interprets 0x5C as the start of an escape sequence (e.g., \t → TAB, \n → LF),
+/// which breaks the 2-byte CID alignment for Identity-H encoded CID-keyed fonts.
+///
+/// This function scans the raw content stream bytes, finds literal strings
+// TODO: 待办 — 非税发票解析 pdf_oxide换库重构
+// TODO: 待办 — 个别发票解析适配
+//   当前遗留问题:
+//   1. SimSun等子集字体ToUnicode CMap不完整(如dzcp发票缺失"司/贸/限"等CID映射),
+//      需TrueType cmap表fallback(需换pdf_oxide等库支持); 当前由OCR兜底。
+//   2. 0x5C字节转义预处理(escape_backslashes_in_literal_strings)是lopdf的workaround,
+//      换库后可能不再需要。
+//   3. Form XObject混合架构(页面标签+XO值)的解析在lopdf下需手动展开,
+//      pdf_oxide原生支持后可简化。
+/// Scans PDF content-stream bytes for literal strings (delimited by balanced
+/// parentheses), and doubles any unescaped 0x5C bytes
+/// (i.e., replaces \ with \\), so that lopdf's escape processing will produce
+/// the original 0x5C byte.
+fn escape_backslashes_in_literal_strings(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() + data.len() / 10); // extra space for escapes
+    let mut i = 0;
+    let len = data.len();
+
+    while i < len {
+        let b = data[i];
+        result.push(b);
+
+        if b == b'(' {
+            // Enter literal string — track balanced parentheses
+            let mut depth = 1i32;
+            i += 1;
+            while i < len && depth > 0 {
+                let c = data[i];
+                if c == b'\\' {
+                    // Check if this is a real PDF escape or a raw 0x5C that should be escaped
+                    // In a well-formed PDF, \\ followed by a recognized escape char (n, r, t, b, f, (, ), \\)
+                    // or octal digit is a real escape. Otherwise, it's a raw 0x5C that needs escaping.
+                    if i + 1 < len {
+                        let next = data[i + 1];
+                        match next {
+                            b'n' | b'r' | b't' | b'b' | b'f' | b'(' | b')' | b'\\'
+                            | b'0'..=b'7' => {
+                                // This looks like a legitimate PDF escape — keep as-is
+                                result.push(c);
+                                i += 1;
+                                result.push(data[i]);
+                            }
+                            _ => {
+                                // Raw 0x5C not part of a recognized escape — escape it
+                                result.push(b'\\');
+                                result.push(b'\\'); // double backslash → lopdf will decode to single 0x5C
+                            }
+                        }
+                    } else {
+                        // Trailing backslash at end of string — escape it
+                        result.push(b'\\');
+                        result.push(b'\\');
+                    }
+                    i += 1;
+                } else if c == b'(' {
+                    depth += 1;
+                    result.push(c);
+                    i += 1;
+                } else if c == b')' {
+                    depth -= 1;
+                    result.push(c);
+                    i += 1;
+                } else {
+                    result.push(c);
+                    i += 1;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    result
 }
 
 /// Parse a ToUnicode CMap string

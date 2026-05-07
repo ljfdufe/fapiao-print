@@ -692,7 +692,7 @@ function _cleanName(raw) {
   name = name.replace(/[A-Z0-9]{15,20}$/, '');
   // Trim at next label keyword (when OCR merges multiple labels into one line)
   name = name.replace(/名\s*称[:：].*$/, '');
-  name = name.replace(/统一社会信用代码.*$/, '');
+  name = name.replace(/统一社会(?:信用代码)?.*$/, '');
   name = name.replace(/纳税人识别号.*$/, '');
   name = name.replace(/开户银行.*$/, '');
   name = name.replace(/银行账号.*$/, '');
@@ -731,12 +731,33 @@ function _cleanName(raw) {
 function _extractNamesCrossLine(text, result) {
   var lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
 
-  // Find all "名称：" positions
+  // Find all "名称：" positions (standalone label) and inline "名称:公司名"
   var nameLabels = [];
+  var inlineNames = [];
   for (var i = 0; i < lines.length; i++) {
     if (/^名\s*称[:：]?$/.test(lines[i])) {
       nameLabels.push(i);
+    } else {
+      // Inline format: "名称:公司名" or "名称：公司名"
+      var inlineMatch = lines[i].match(/^名\s*称[:：]\s*(.+)$/);
+      if (inlineMatch) {
+        var inlineName = _cleanName(inlineMatch[1]);
+        if (inlineName) {
+          inlineNames.push({ line: i, name: inlineName });
+        }
+      }
     }
+  }
+
+  // If inline names were found, use them directly (first = buyer, second = seller)
+  if (inlineNames.length >= 2) {
+    if (!result.buyerName) result.buyerName = inlineNames[0].name;
+    if (!result.sellerName) result.sellerName = inlineNames[1].name;
+    return;
+  }
+  if (inlineNames.length === 1) {
+    // Single inline name — likely buyer (first "名称" in the document)
+    if (!result.buyerName) result.buyerName = inlineNames[0].name;
   }
 
   // Find all potential company names (Chinese strings of reasonable length)
@@ -934,17 +955,41 @@ function _extractNamesByCoords(words, result) {
   if (!words || words.length === 0) return;
 
   var nameLabels = words.filter(function(w) {
-    return /^名\s*称[:：]?$/.test(w.text) || /^名\s*称[:：]?$/.test(w.normText);
+    return /^名\s*称[:：]/.test(w.text) || /^名\s*称[:：]/.test(w.normText);
   });
   if (nameLabels.length === 0) return;
 
+  // Extract inline name values from fused "名称:公司名" words
+  // Some PDF text layers produce "名称:无锡天鹏菜篮子工程有限公司" as a single word
+  var inlineNameResults = [];
+  for (var _ilni = 0; _ilni < nameLabels.length; _ilni++) {
+    var _ilnWord = nameLabels[_ilni];
+    var _ilnText = _ilnWord.text || _ilnWord.normText;
+    var _ilnMatch = _ilnText.match(/^名\s*称[:：]\s*(.+)$/);
+    if (_ilnMatch && _ilnMatch[1].trim()) {
+      var _ilnName = _cleanName(_ilnMatch[1]);
+      if (_ilnName) {
+        var _ilnIsLeft = _ilnWord.nx < 0.5;
+        inlineNameResults.push({ label: _ilnWord, name: _ilnName, ny: _ilnWord.ny, nx: _ilnWord.nx, wordIndex: words.indexOf(_ilnWord), isLeftSide: _ilnIsLeft });
+      }
+    }
+  }
+
   var creditLabels = words.filter(function(w) {
-    return /统一社会信用代码|纳税人识别号/.test(w.text) || /统一社会信用代码|纳税人识别号/.test(w.normText);
+    return /统一社会(?:信用代码)?|纳税人识别号/.test(w.text) || /统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
   });
 
   var foundNames = [];
+  // Add inline name results first (from "名称:公司名" fused words)
+  for (var _ilri = 0; _ilri < inlineNameResults.length; _ilri++) {
+    foundNames.push(inlineNameResults[_ilri]);
+  }
   for (var li = 0; li < nameLabels.length; li++) {
     var label = nameLabels[li];
+    // Skip if this label already produced an inline name result
+    var _alreadyInline = inlineNameResults.some(function(r) { return r.label === label; });
+    if (_alreadyInline) continue;
+
     var labelBottom = label.y + label.h;
     var lineH = label.h;
 
@@ -972,8 +1017,8 @@ function _extractNamesByCoords(words, result) {
       // Only look above for right-side labels (seller) — buyer labels should only look below
       var includeAbove = !isLeftSide && isAboveLabel && w.x >= label.x - lineH * 2;
       var isInYRange = isBelowOrSameLine || includeAbove;
-      var isNotLabel = !/^名\s*称[:：]?$/.test(w.text) && !/^名\s*称[:：]?$/.test(w.normText);
-      var isNotCreditLabel = !/统一社会信用代码|纳税人识别号/.test(w.text) && !/统一社会信用代码|纳税人识别号/.test(w.normText);
+      var isNotLabel = !/^名\s*称[:：]/.test(w.text) && !/^名\s*称[:：]/.test(w.normText);
+      var isNotCreditLabel = !/统一社会(?:信用代码)?|纳税人识别号/.test(w.text) && !/统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
       var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通)$/.test(w.normText);
       // Filter out metadata/watermark words (download count, verification count, etc.)
       var isNotMetadata = !/^(?:下载|查验|开具|打印)次数/.test(w.text) && !/^(?:下载|查验|开具|打印)次数/.test(w.normText);
@@ -1183,9 +1228,11 @@ function _extractByText(fullText, words) {
     var coordCodes = { buyer: '', seller: '' };
     words.forEach(function(w) {
       var cleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-      if (cleaned.length >= 15 && cleaned.length <= 20 && ccWordRe.test(cleaned)) {
-        // Must contain at least one letter (exclude pure-digit invoice numbers)
-        if (!/[A-Z]/.test(cleaned)) return;
+      // 18-char code: allow pure digits (统一社会信用代码 can be all digits per GB 32100-2015)
+      // Non-18 pure-digit codes are more likely invoice numbers — skip them
+      var _ccPureDigit = /^\d+$/.test(cleaned);
+      if (cleaned.length >= 15 && cleaned.length <= 20 && /^[0-9]/.test(cleaned) &&
+          (!_ccPureDigit || cleaned.length === 18)) {
         if (w.nx < 0.5) {
           if (!coordCodes.buyer) coordCodes.buyer = cleaned;
         } else {
@@ -1197,6 +1244,58 @@ function _extractByText(fullText, words) {
     if (coordCodes.seller) result.sellerCreditCode = coordCodes.seller;
   }
 
+  // Method 1.5: Label-tracing — when credit code is split into single-char words
+  // Some PDFs (dzcp format) split "91320200796148368W" into '9','1','3',...
+  // The label word contains "统一社会信用代码/纳税人识别号:9" (first digit fused).
+  if ((!result.buyerCreditCode || !result.sellerCreditCode) && words && words.length > 0) {
+    var ccLabelWords = words.filter(function(w) {
+      return /统一社会(?:信用代码)?/.test(w.text) || /统一社会(?:信用代码)?/.test(w.normText);
+    });
+    var _tracedCodes = [];
+    for (var _tci = 0; _tci < ccLabelWords.length; _tci++) {
+      var _tcLabel = ccLabelWords[_tci];
+      var _tcLabelText = _tcLabel.text || _tcLabel.normText;
+      var _tcLabelDigits = _tcLabelText.replace(/[^A-Za-z0-9]/g, '');
+      var _tcCode = _tcLabelDigits;
+      // Collect single-char words on the same line and to the right of the label
+      var _tcSameLineWords = words.filter(function(w) {
+        if (w === _tcLabel) return false;
+        if (Math.abs(w.cy - _tcLabel.cy) > _tcLabel.h * 2.5) return false;
+        if (w.x < _tcLabel.x + _tcLabel.w - _tcLabel.h) return false;
+        return true;
+      });
+      _tcSameLineWords.sort(function(a, b) { return a.x - b.x; });
+      for (var _tswi = 0; _tswi < _tcSameLineWords.length; _tswi++) {
+        var _tsw = _tcSameLineWords[_tswi];
+        var _tswText = _tsw.normText || _tsw.text;
+        if (/^[A-Za-z0-9]$/.test(_tswText)) {
+          _tcCode += _tswText;
+        } else if (/^[A-Za-z0-9]{2,4}$/.test(_tswText) && _tcCode.length + _tswText.length <= 18) {
+          _tcCode += _tswText;
+        }
+        if (_tcCode.length >= 18) break;
+      }
+      _tcCode = _tcCode.toUpperCase();
+      if (_tcCode.length === 18 && /^[0-9]/.test(_tcCode)) {
+        _tracedCodes.push({ code: _tcCode, isLeft: _tcLabel.nx < 0.5 });
+      }
+    }
+    for (var _tai = 0; _tai < _tracedCodes.length; _tai++) {
+      if (_tracedCodes[_tai].isLeft && !result.buyerCreditCode) {
+        result.buyerCreditCode = _tracedCodes[_tai].code;
+      } else if (!_tracedCodes[_tai].isLeft && !result.sellerCreditCode) {
+        result.sellerCreditCode = _tracedCodes[_tai].code;
+      }
+    }
+    if (_tracedCodes.length >= 2 && (!result.buyerCreditCode || !result.sellerCreditCode)) {
+      if (!result.buyerCreditCode) result.buyerCreditCode = _tracedCodes[0].code;
+      if (!result.sellerCreditCode) result.sellerCreditCode = _tracedCodes[1].code;
+    }
+    if (_tracedCodes.length === 1 && !result.sellerCreditCode) {
+      result.sellerCreditCode = _tracedCodes[0].code;
+    }
+  }
+
   // Method 2: Text regex fallback (only if coordinate method didn't find both codes)
   if (!result.buyerCreditCode || !result.sellerCreditCode) {
     var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
@@ -1205,8 +1304,9 @@ function _extractByText(fullText, words) {
     var cm;
     while ((cm = ccRegex.exec(text)) !== null) {
       var code = cm[1].toUpperCase();
-      // Guard: credit codes must contain at least one letter (exclude invoice numbers)
-      if (!/[A-Z]/.test(code)) continue;
+      // Guard: 18位纯数字也可能是信用代码；非18位纯数字则排除
+      var _ccPureDigit2 = /^\d+$/.test(code);
+      if (_ccPureDigit2 && code.length !== 18) continue;
       if (codes.indexOf(code) < 0) {
         codes.push(code);
         ccPositions.push(cm.index);
@@ -1925,26 +2025,39 @@ function _extractSeller(words, imgW, imgH) {
 
   // Pattern 2: "名称:" in seller region (right half) — guaranteed seller
   if (!sellerName) {
-    var nameLabels = _findWords(sellerWords, /^名\s*称$/);
-    if (nameLabels.length > 0) {
-      // There may be 2 "名称:" — one for buyer, one for seller. Pick rightmost.
-      var rightNameLabel = nameLabels[nameLabels.length - 1];
-      var nearbyNames2 = words.filter(function(w) {
-        if (w === rightNameLabel) return false;
-        if (Math.abs(w.cy - rightNameLabel.cy) > rightNameLabel.h * 2) return false;
-        if (w.cx < rightNameLabel.cx - 10) return false;
-        return /[\u4e00-\u9fff]/.test(w.text) && w.text.length > 1;
-      });
-      if (nearbyNames2.length > 0) {
-        nearbyNames2.sort(function(a, b) { return a.x - b.x; });
-        var nameParts2 = [];
-        var lastRight2 = 0;
-        for (var ni2 = 0; ni2 < nearbyNames2.length; ni2++) {
-          if (nearbyNames2[ni2].x > lastRight2 + nearbyNames2[ni2].h * 2) break;
-          nameParts2.push(nearbyNames2[ni2].text);
-          lastRight2 = nearbyNames2[ni2].x + nearbyNames2[ni2].w;
+    var nameLabels = _findWords(sellerWords, /^名\s*称[:：]?$/);
+    // Also check for inline "名称:公司名" format
+    var inlineNameLabels = _findWords(sellerWords, /^名\s*称[:：]/);
+    // Merge both, preferring inline format
+    var allNameLabels = inlineNameLabels.length > 0 ? inlineNameLabels : nameLabels;
+    if (allNameLabels.length > 0) {
+      // Pick rightmost label
+      var rightNameLabel = allNameLabels[allNameLabels.length - 1];
+      // Check if this is an inline "名称:公司名" word
+      var rightNlText = rightNameLabel.text || rightNameLabel.normText;
+      var rightNlInlineMatch = rightNlText.match(/^名\s*称[:：]\s*(.+)$/);
+      if (rightNlInlineMatch) {
+        var _snInline = _cleanName(rightNlInlineMatch[1]);
+        if (_snInline) sellerName = _snInline;
+      }
+      if (!sellerName) {
+        var nearbyNames2 = words.filter(function(w) {
+          if (w === rightNameLabel) return false;
+          if (Math.abs(w.cy - rightNameLabel.cy) > rightNameLabel.h * 2) return false;
+          if (w.cx < rightNameLabel.cx - 10) return false;
+          return /[\u4e00-\u9fff]/.test(w.text) && w.text.length > 1;
+        });
+        if (nearbyNames2.length > 0) {
+          nearbyNames2.sort(function(a, b) { return a.x - b.x; });
+          var nameParts2 = [];
+          var lastRight2 = 0;
+          for (var ni2 = 0; ni2 < nearbyNames2.length; ni2++) {
+            if (nearbyNames2[ni2].x > lastRight2 + nearbyNames2[ni2].h * 2) break;
+            nameParts2.push(nearbyNames2[ni2].text);
+            lastRight2 = nearbyNames2[ni2].x + nearbyNames2[ni2].w;
+          }
+          if (nameParts2.length > 0) sellerName = nameParts2.join('');
         }
-        if (nameParts2.length > 0) sellerName = nameParts2.join('');
       }
     }
   }
@@ -2178,6 +2291,11 @@ function extractByCoordinates(ocrResult) {
       console.log('[校验] sellerName过短且无公司后缀，已清除:', sellerName);
       sellerName = '';
     }
+    // Also check: sellerName is a fragment of "统一社会信用代码" label
+    if (/^统一社会/.test(sellerName)) {
+      console.log('[校验] sellerName疑似信用代码标签片段，已清除:', sellerName);
+      sellerName = '';
+    }
   }
 
   // --- Seller info (coordinate-based FALLBACK — text-based is primary) ---
@@ -2192,7 +2310,8 @@ function extractByCoordinates(ocrResult) {
   // This is more reliable than coordinate-based matching for the "合计" row
   // which has TWO amounts that coordinate methods can't easily distinguish.
   var textAmounts = _extractAmountsByText(fullText);
-  if (textAmounts.amountTax > 0) amountTax = textAmounts.amountTax;
+  var _amountTaxFromText = false;
+  if (textAmounts.amountTax > 0) { amountTax = textAmounts.amountTax; _amountTaxFromText = true; }
   if (textAmounts.amountNoTax > 0) amountNoTax = textAmounts.amountNoTax;
   var _taxAmountResolved = false;
   if (textAmounts.taxAmount > 0) {
@@ -2367,8 +2486,9 @@ function extractByCoordinates(ocrResult) {
 
       if (rowAmts.length >= 2) {
         rowAmts.sort(function(a, b) { return b - a; });
-        if (!amountNoTax) amountNoTax = rowAmts[0];
-        if (!taxAmount) taxAmount = rowAmts[rowAmts.length - 1];
+        // 当amountTax已由文本提取确定时，不含税价不应超过含税价
+        if (!amountNoTax && !(amountTax > 0 && rowAmts[0] > amountTax)) amountNoTax = rowAmts[0];
+        if (!taxAmount && !(amountTax > 0 && rowAmts[rowAmts.length - 1] > amountTax)) taxAmount = rowAmts[rowAmts.length - 1];
         break;
       } else if (rowAmts.length === 1) {
         if (amountTax > 0 && rowAmts[0] > amountTax) continue;
@@ -2544,8 +2664,15 @@ function extractByCoordinates(ocrResult) {
   }
 
   // --- Invariants ---
-  if (amountTax > 0 && amountNoTax > 0 && amountTax < amountNoTax) {
+  // 交换前提：amountTax必须不是由文本提取确定的(文本提取的amountTax更可靠)
+  // 且坐标amountNoTax超过amountTax时，更可能是坐标提取错误，不应交换
+  if (amountTax > 0 && amountNoTax > 0 && amountTax < amountNoTax && !_amountTaxFromText) {
     var _tmp = amountTax; amountTax = amountNoTax; amountNoTax = _tmp;
+  }
+  // 当文本提取的amountTax可靠时，丢弃超过它的坐标amountNoTax
+  if (_amountTaxFromText && amountNoTax > amountTax) {
+    console.log('[不变量] 坐标amountNoTax(' + amountNoTax + ')超过文本amountTax(' + amountTax + ')，已清除');
+    amountNoTax = 0;
   }
   if (amountNoTax > 0 && amountTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && taxAmount > 0) {
     taxAmount = 0;
@@ -2559,7 +2686,7 @@ function extractByCoordinates(ocrResult) {
   }
 
   // --- Credit code fallback (from full text if both text-based and coordinates missed) ---
-  // Guard: credit codes MUST contain at least one letter (exclude pure-digit invoice numbers like "25322000000358571072")
+  // 18位纯数字也可能是统一社会信用代码(GB 32100-2015)，不再强制要求含字母
   if (!sellerCreditCode || !buyerCreditCode) {
     // Try coordinate-based first: find code words by position
     if (words && words.length > 0) {
@@ -2567,7 +2694,10 @@ function extractByCoordinates(ocrResult) {
       var coordFallback = { buyer: '', seller: '' };
       words.forEach(function(w) {
         var cleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-        if (ccWordRe2.test(cleaned) && /[A-Z]/.test(cleaned)) {
+        // 18位纯数字也可能是统一社会信用代码(GB 32100-2015)，不再强制要求含字母
+        // 但排除15-17位和19-20位纯数字(更可能是发票号码)
+        var _isPureDigit = /^\d+$/.test(cleaned);
+        if (ccWordRe2.test(cleaned) && (!_isPureDigit || cleaned.length === 18)) {
           if (w.nx < 0.5 && !coordFallback.buyer) coordFallback.buyer = cleaned;
           else if (w.nx >= 0.5 && !coordFallback.seller) coordFallback.seller = cleaned;
         }
@@ -2575,14 +2705,83 @@ function extractByCoordinates(ocrResult) {
       if (!buyerCreditCode && coordFallback.buyer) buyerCreditCode = coordFallback.buyer;
       if (!sellerCreditCode && coordFallback.seller) sellerCreditCode = coordFallback.seller;
     }
+
+    // Method 1.5: Label-tracing strategy — when credit code is split into single-char words
+    // Some PDFs (dzcp format) split "91320200796148368W" into individual chars: '9','1','3',...
+    // The label word contains "统一社会信用代码/纳税人识别号:9" (first digit fused with label).
+    // Strategy: find label words, extract the fused first digit, then collect adjacent single-char
+    // words to reconstruct the full 18-char credit code.
+    if ((!buyerCreditCode || !sellerCreditCode) && words && words.length > 0) {
+      var ccLabelWords = words.filter(function(w) {
+        return /统一社会(?:信用代码)?/.test(w.text) || /统一社会(?:信用代码)?/.test(w.normText);
+      });
+      var tracedCodes = [];
+      for (var _tci = 0; _tci < ccLabelWords.length; _tci++) {
+        var _tcLabel = ccLabelWords[_tci];
+        // Extract fused digits from the label itself (e.g., ":9" → "9")
+        var _tcLabelText = _tcLabel.text || _tcLabel.normText;
+        var _tcLabelDigits = _tcLabelText.replace(/[^A-Za-z0-9]/g, '');
+        var _tcCode = _tcLabelDigits; // start with any digits/letters fused into the label
+        // Collect single-char words on the same line and to the right of the label
+        var _tcSameLineWords = words.filter(function(w) {
+          if (w === _tcLabel) return false;
+          // Must be roughly on the same line (within 2x line height)
+          if (Math.abs(w.cy - _tcLabel.cy) > _tcLabel.h * 2.5) return false;
+          // Must be to the right of or very close to the label
+          if (w.x < _tcLabel.x + _tcLabel.w - _tcLabel.h) return false;
+          return true;
+        });
+        // Sort by x position (left to right) and collect single-char alphanumeric words
+        _tcSameLineWords.sort(function(a, b) { return a.x - b.x; });
+        for (var _tswi = 0; _tswi < _tcSameLineWords.length; _tswi++) {
+          var _tsw = _tcSameLineWords[_tswi];
+          var _tswText = _tsw.normText || _tsw.text;
+          // Only accept single alphanumeric characters or short digit/letter sequences
+          if (/^[A-Za-z0-9]$/.test(_tswText)) {
+            _tcCode += _tswText;
+          } else if (/^[A-Za-z0-9]{2,4}$/.test(_tswText) && _tcCode.length + _tswText.length <= 18) {
+            // Short sequences that could be part of the code
+            _tcCode += _tswText;
+          }
+          if (_tcCode.length >= 18) break;
+        }
+        // Validate: must be exactly 18 chars starting with a digit
+        _tcCode = _tcCode.toUpperCase();
+        if (_tcCode.length === 18 && /^[0-9]/.test(_tcCode)) {
+          var _tcIsLeft = _tcLabel.nx < 0.5;
+          tracedCodes.push({ code: _tcCode, isLeft: _tcIsLeft, nx: _tcLabel.nx });
+        }
+      }
+      // Assign traced codes by position
+      for (var _tai = 0; _tai < tracedCodes.length; _tai++) {
+        if (tracedCodes[_tai].isLeft && !buyerCreditCode) {
+          buyerCreditCode = tracedCodes[_tai].code;
+        } else if (!tracedCodes[_tai].isLeft && !sellerCreditCode) {
+          sellerCreditCode = tracedCodes[_tai].code;
+        }
+      }
+      // Fallback: if position-based assignment didn't work, use order
+      if (tracedCodes.length >= 2 && (!buyerCreditCode || !sellerCreditCode)) {
+        if (!buyerCreditCode) buyerCreditCode = tracedCodes[0].code;
+        if (!sellerCreditCode) sellerCreditCode = tracedCodes[1].code;
+      }
+      if (tracedCodes.length === 1 && !sellerCreditCode && !buyerCreditCode) {
+        // Single code → likely seller
+        sellerCreditCode = tracedCodes[0].code;
+      }
+      if (tracedCodes.length > 0) {
+        console.log('[信用代码追踪] 从标签追踪拼接:', tracedCodes.map(function(c) { return c.code + (c.isLeft ? '(买)' : '(售)'); }));
+      }
+    }
     // Then try text regex
     if (!sellerCreditCode || !buyerCreditCode) {
       var ccRe = /(?:纳税人识别号|统一社会信用代码)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
       var ccM, allCc = [];
       while ((ccM = ccRe.exec(normText)) !== null) {
         var cc = ccM[1].toUpperCase();
-        // Guard: must contain at least one letter
-        if (!/[A-Z]/.test(cc)) continue;
+        // Guard: 18位纯数字也可能是信用代码；非18位纯数字则排除
+        var _ccPureDigit = /^\d+$/.test(cc);
+        if (_ccPureDigit && cc.length !== 18) continue;
         if (allCc.indexOf(cc) < 0) allCc.push(cc);
       }
       if (allCc.length >= 2) {
@@ -2597,8 +2796,8 @@ function extractByCoordinates(ocrResult) {
     var sccRe = /\b([0-9][A-Z0-9]{17})\b/g;
     var sccM, lastScc = '';
     while ((sccM = sccRe.exec(normText)) !== null) {
-      // Guard: must contain at least one letter AND look like a credit code
-      if (/\d{6,}/.test(sccM[1]) && /[A-Z]/.test(sccM[1])) lastScc = sccM[1];
+      // Guard: 18位纯数字也可能是信用代码(GB 32100-2015)，不再强制要求含字母
+      if (/\d{6,}/.test(sccM[1])) lastScc = sccM[1];
     }
     if (lastScc) sellerCreditCode = lastScc.toUpperCase();
   }
@@ -2626,13 +2825,20 @@ function extractByCoordinates(ocrResult) {
     }
   }
 
-  // Check 2: sellerCreditCode looks like an invoice number (all digits, 18-20 chars)
-  if (sellerCreditCode && /^\d{15,20}$/.test(sellerCreditCode)) {
-    console.log('[校验] sellerCreditCode疑似发票号码(纯数字)，已清除:', sellerCreditCode);
+  // Check 2: sellerCreditCode looks like an invoice number (all digits, long)
+  // 统一社会信用代码(18位)可以是纯数字(GB 32100-2015)，不能一刀切清除
+  // 只有长度!=18或校验位不通过的纯数字才视为发票号码
+  function _isLikelyInvoiceNotCreditCode(code) {
+    if (!/^\d+$/.test(code)) return false; // 含字母，不是纯数字发票号
+    if (code.length === 18) return false; // 18位纯数字可能是信用代码，保留
+    return true; // 15,16,17,19,20位纯数字→更可能是发票号码
+  }
+  if (sellerCreditCode && _isLikelyInvoiceNotCreditCode(sellerCreditCode)) {
+    console.log('[校验] sellerCreditCode疑似发票号码(纯数字非18位)，已清除:', sellerCreditCode);
     sellerCreditCode = '';
   }
-  if (buyerCreditCode && /^\d{15,20}$/.test(buyerCreditCode)) {
-    console.log('[校验] buyerCreditCode疑似发票号码(纯数字)，已清除:', buyerCreditCode);
+  if (buyerCreditCode && _isLikelyInvoiceNotCreditCode(buyerCreditCode)) {
+    console.log('[校验] buyerCreditCode疑似发票号码(纯数字非18位)，已清除:', buyerCreditCode);
     buyerCreditCode = '';
   }
 
