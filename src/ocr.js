@@ -155,6 +155,16 @@ function getTicketTypeLabel(text) {
 }
 
 /**
+ * Get a descriptive label for non-tax invoice type (shown as sellerName for non-tax invoices)
+ */
+function getNonTaxLabel(text) {
+  var t = text.substring(0, 500);
+  if (/非\s*税\s*收\s*入\s*统\s*一\s*票\s*据/.test(t)) return '非税收入票据';
+  if (/非\s*税/.test(t)) return '非税票据';
+  return '非税票据';
+}
+
+/**
  * Normalize OCR currency symbol artifacts.
  * OCR commonly misreads digits and ¥ symbols because they look similar:
  *   - "1" as "¥" → "¥¥72.68" should be "¥172.68" (second ¥ is misread "1")
@@ -388,6 +398,7 @@ function applyOcrResult(fileObj, ocrResult) {
     // Always set _ocrText for display — this is the main purpose of running OCR on all pages
     fileObj._ocrText = info._ocrText || ocrResult.text || '';
     fileObj._isTicket = info.isTicket || false;
+    fileObj._isNonTax = info.isNonTax || false;
 
     // If amounts already set by PDF text extraction, skip OCR amount validation
     // to avoid duplicate warning logs
@@ -397,10 +408,10 @@ function applyOcrResult(fileObj, ocrResult) {
         fileObj.taxAmount = info.taxAmount;
       }
       if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
-      if (!info.isTicket && info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
+      if (!info.isTicket && !info.isNonTax && info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
       if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
       if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-      if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+      if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
       if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
       return;
     }
@@ -439,12 +450,12 @@ function applyOcrResult(fileObj, ocrResult) {
       fileObj.taxAmount = info.taxAmount;
     }
     if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
-    if (!info.isTicket) {
+    if (!info.isTicket && !info.isNonTax) {
       if (info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
     }
     if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
     if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
     if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
   } catch(e) {
     console.warn('[OCR] 结果应用失败:', e);
@@ -518,17 +529,18 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
       }
     }
 
-    // Set _ocrText and _isTicket for display
+    // Set _ocrText and _isTicket/_isNonTax for display
     fileObj._ocrText = info._ocrText || pdfTextResult.text || '';
     fileObj._isTicket = info.isTicket || false;
+    fileObj._isNonTax = info.isNonTax || false;
 
     // Only fill empty fields — structured extraction priority
     if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
     if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
     if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
     if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
-    if (!info.isTicket) {
+    if (!info.isTicket && !info.isNonTax) {
       if (info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
     }
 
@@ -1484,7 +1496,9 @@ function _extractAmountsByText(fullText) {
 
   // Pattern 1: "（小写）¥XXX.XX" — most specific indicator of 含税价
   // Enhanced: handle spaces between "小写）" and "¥" (PDF text often has "（小写） ¥ 4500.00")
-  var xxMatch = text.match(/小\s*写[）\)]*[：:]*\s*¥?\s*(\d[\d,]*\.\d{2})/);
+  // Also handle · (middle dot U+00B7) / • (bullet U+2022) replacing ¥ — some PDFs render
+  // "(小写)·162.98" where · is a corrupted ¥ symbol or PDF text extraction artifact.
+  var xxMatch = text.match(/小\s*写[）\)]*[：:]*\s*[¥·•]?\s*(\d[\d,]*\.\d{2})/);
   if (xxMatch) {
     var v1 = parseAmt(xxMatch[1]);
     if (v1 > 10 && !isLikelyYearOrDate(v1, xxMatch[1])) {
@@ -1494,8 +1508,9 @@ function _extractAmountsByText(fullText) {
   }
   // Pattern 1b: "（小写）" and amount on the same line but separated
   // e.g., "小写）¥4500.00" with possible space between ¥ and digits
+  // Also handles "小写）·162.98" where · replaces ¥
   if (!result.amountTax) {
-    var xxBare = text.match(/小\s*写[）\)]*[：:]*\s*(\d[\d,]*\.\d{2})/);
+    var xxBare = text.match(/小\s*写[）\)]*[：:]*[\s·•]*\s*(\d[\d,]*\.\d{2})/);
     if (xxBare) {
       var v1b = parseAmt(xxBare[1]);
       if (v1b > 10 && !isLikelyYearOrDate(v1b, xxBare[1])) {
@@ -1508,10 +1523,10 @@ function _extractAmountsByText(fullText) {
   // PDF content stream often has "（小写）\n柒万圆整\n¥70000.00" where the Chinese
   // numeral blocks Pattern 1's \s* from reaching the ¥ amount.
   // Allow Chinese numeral characters between "小写）" and the ¥ amount.
-  // IMPORTANT: ¥ is REQUIRED (not optional) to avoid matching wrong amounts
+  // IMPORTANT: ¥/·/• is REQUIRED (not optional) to avoid matching wrong amounts
   // when other numbers appear between （小写） and the target amount.
   if (!result.amountTax) {
-    var xxChinese = text.match(/小\s*写[）\)]*[：:]*[\s零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]*¥\s*(\d[\d,]*\.\d{2})/);
+    var xxChinese = text.match(/小\s*写[）\)]*[：:]*[\s零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]*[¥·•]\s*(\d[\d,]*\.\d{2})/);
     if (xxChinese) {
       var v1c = parseAmt(xxChinese[1]);
       if (v1c > 10 && !isLikelyYearOrDate(v1c, xxChinese[1])) {
@@ -1520,14 +1535,15 @@ function _extractAmountsByText(fullText) {
       }
     }
   }
-  // Pattern 2: Find largest ¥ amount after "价税合计" or "金额合计" (non-tax invoices)
+  // Pattern 2: Find largest ¥/· amount after "价税合计" or "金额合计" (non-tax invoices)
   // IMPORTANT: Use LARGEST, not last — PDF content stream order may differ from visual order,
   // placing 合计-row ¥ amounts after 含税价 ¥ amount. 含税价 is always the largest (含税=不含税+税额).
+  // Also match · (middle dot) as it can replace ¥ in some PDF text extractions.
   if (!result.amountTax) {
     var jshjIdx = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjIdx >= 0) {
       var afterJshj = text.substring(jshjIdx);
-      var jshjAmtRe = /¥\s*(\d[\d,]*\.\d{2})/g;
+      var jshjAmtRe = /[¥·•]\s*(\d[\d,]*\.\d{2})/g;
       var jm, maxAmt = 0;
       while ((jm = jshjAmtRe.exec(afterJshj)) !== null) {
         var v2 = parseAmt(jm[1]);
@@ -1542,11 +1558,12 @@ function _extractAmountsByText(fullText) {
     }
   }
   // Pattern 2b: Bare amount after "价税合计" or "金额合计" (no ¥, no 小写)
+  // Also handle · between ） and amount digits
   if (!result.amountTax) {
     var jshjIdx2 = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjIdx2 >= 0) {
       var afterJshj2 = text.substring(jshjIdx2);
-      var bareJshj = afterJshj2.match(/[）\)][：:]*\s*(\d[\d,]*\.\d{2})/);
+      var bareJshj = afterJshj2.match(/[）\)][：:]*[\s·•]*(\d[\d,]*\.\d{2})/);
       if (bareJshj) {
         var v2b = parseAmt(bareJshj[1]);
         if (v2b > 10 && !isLikelyYearOrDate(v2b, bareJshj[1])) {
@@ -1975,6 +1992,11 @@ function _detectInvoiceType(words, imgW, imgH) {
       return 'ticket';
     }
   }
+  // Check for non-tax invoice (非税收入统一票据) keywords
+  if (/(?:非\s*税\s*收\s*入|票\s*据\s*号\s*码|票\s*据\s*代\s*码|交\s*款\s*人)/.test(allText)) {
+    return 'nontax';
+  }
+
   // Check for ride-hailing keywords
   if (/(?:出\s*租|打\s*车|网\s*约|滴\s*滴|专\s*车|客\s*运\s*服\s*务)/.test(allText)) {
     return 'ride';
@@ -2315,7 +2337,42 @@ function extractByCoordinates(ocrResult) {
              sellerName: sellerName, sellerCreditCode: sellerCreditCode,
              invoiceNo: invoiceNo, invoiceDate: invoiceDate,
              buyerName: buyerName, buyerCreditCode: buyerCreditCode,
-             _ocrText: fullText, isTicket: true };
+             _ocrText: fullText, isTicket: true, isNonTax: false };
+  }
+
+  // === Non-tax invoice extraction (非税收入票据) ===
+  var isNonTax = invType === 'nontax';
+  if (isNonTax) {
+    // Non-tax invoices don't have a traditional seller — override with label
+    sellerName = getNonTaxLabel(fullText);
+
+    // Extract amounts using text patterns
+    var nontaxAmts = _extractAmountsByText(fullText);
+    amountTax = nontaxAmts.amountTax;
+    amountNoTax = nontaxAmts.amountNoTax;
+    taxAmount = nontaxAmts.taxAmount;
+
+    // Non-tax invoices have no tax — amountNoTax = amountTax
+    if (amountTax > 0 && amountNoTax === 0) {
+      amountNoTax = amountTax;
+      taxAmount = 0;
+    }
+
+    // Non-tax invoices: don't show buyer name
+    buyerName = '';
+
+    // Credit code belongs to buyer (交款人), not seller
+    if (sellerCreditCode && !buyerCreditCode) {
+      buyerCreditCode = sellerCreditCode;
+      sellerCreditCode = '';
+    }
+
+    console.log('[坐标提取] 非税票据金额:', amountTax);
+    return { amountTax: amountTax, amountNoTax: amountNoTax, taxAmount: 0,
+             sellerName: sellerName, sellerCreditCode: sellerCreditCode,
+             invoiceNo: invoiceNo, invoiceDate: invoiceDate,
+             buyerName: '', buyerCreditCode: buyerCreditCode,
+             _ocrText: fullText, isTicket: false, isNonTax: true };
   }
 
   // === VAT / Ride invoice extraction ===
@@ -2919,7 +2976,7 @@ function extractByCoordinates(ocrResult) {
            sellerName: sellerName, sellerCreditCode: sellerCreditCode,
            invoiceNo: invoiceNo, invoiceDate: invoiceDate,
            buyerName: buyerName, buyerCreditCode: buyerCreditCode,
-           _ocrText: fullText, isTicket: false };
+           _ocrText: fullText, isTicket: false, isNonTax: false };
 }
 
 /**
