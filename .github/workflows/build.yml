@@ -143,7 +143,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body: |
-            See [CHANGELOG](https://github.com/erma0/fapiao-print/commits/main) for details.
+            See [CHANGELOG](https://github.com/erma0/fapiao-print/blob/master/CHANGELOG.md) for details.
           draft: false
           prerelease: false
           files: dist/*
