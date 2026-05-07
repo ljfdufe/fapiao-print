@@ -709,7 +709,7 @@ function updateFileItem(fileObj) {
   var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
   var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
   var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
-  var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
+  var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
   var metaEl = items[idx].querySelector('.file-meta');
   var sellerEl = items[idx].querySelector('.file-seller');
   if (metaEl) metaEl.innerHTML = fmtSize(f.size) + cb + rb + ab;
@@ -1017,7 +1017,7 @@ function renderFileList() {
     var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
     var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
     var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
-    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
+    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
     // XSS FIX: escHtml(f.name) in both title and display text
     // XSS FIX: escHtml(f.previewUrl) in img src, escHtml(f.type) in type-badge
     var safePreviewUrl = escHtml(f.previewUrl || '');

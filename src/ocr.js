@@ -411,13 +411,14 @@ function applyOcrResult(fileObj, ocrResult) {
       if (!info.isTicket && !info.isNonTax && info.sellerCreditCode && !fileObj.sellerCreditCode) fileObj.sellerCreditCode = info.sellerCreditCode;
       if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
       if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-      if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+      if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
       if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
       return;
     }
 
     // --- 后置校验：金额求和验证（含税价 ≈ 不含税 + 税额）---
-    if (info.amountTax > 0 && info.amountNoTax > 0) {
+    // 非税发票(无税额)和火车票(金额结构不同)跳过此验证
+    if (!info.isNonTax && !info.isTicket && info.amountTax > 0 && info.amountNoTax > 0) {
       var _sum = Math.round((info.amountNoTax + info.taxAmount) * 100) / 100;
       if (Math.abs(_sum - info.amountTax) > 0.02) {
         console.warn('[验证] 金额求和校验失败: 含税=' + info.amountTax +
@@ -455,7 +456,7 @@ function applyOcrResult(fileObj, ocrResult) {
     }
     if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
     if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-    if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
     if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
   } catch(e) {
     console.warn('[OCR] 结果应用失败:', e);
@@ -506,7 +507,8 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
     });
 
     // --- 后置校验：金额求和验证（含税价 ≈ 不含税 + 税额）---
-    if (info.amountTax > 0 && info.amountNoTax > 0) {
+    // 非税发票(无税额)和火车票(金额结构不同)跳过此验证
+    if (!info.isNonTax && !info.isTicket && info.amountTax > 0 && info.amountNoTax > 0) {
       var _sum = Math.round((info.amountNoTax + info.taxAmount) * 100) / 100;
       if (Math.abs(_sum - info.amountTax) > 0.02) {
         console.warn('[PDF文字提取] 金额求和校验失败: 含税=' + info.amountTax +
@@ -537,7 +539,7 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
     // Only fill empty fields — structured extraction priority
     if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
     if (info.invoiceDate && !fileObj.invoiceDate) fileObj.invoiceDate = info.invoiceDate;
-    if (!info.isNonTax && info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
+    if (info.buyerName && !fileObj.buyerName) fileObj.buyerName = info.buyerName;
     if (info.buyerCreditCode && !fileObj.buyerCreditCode) fileObj.buyerCreditCode = info.buyerCreditCode;
     if (info.sellerName && !fileObj.sellerName) fileObj.sellerName = info.sellerName;
     if (!info.isTicket && !info.isNonTax) {
@@ -1143,9 +1145,28 @@ function _extractByText(fullText, words) {
   }
   // Pattern 3: Loose cross-line (label and value separated by multiple lines)
   // e.g., "发票号码：\n...\n25322000000337005189"
+  // Find ALL digit sequences of 8-20 digits after the label, pick the longest one.
+  // This avoids matching credit code prefixes like "91320583" (8 digits) when the
+  // actual invoice number is "25327200000104224588" (20 digits).
   if (!result.invoiceNo) {
-    var noLooseMatch = text.match(/(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)[:：][\s\S]*?(\d{8,20})/);
-    if (noLooseMatch) result.invoiceNo = noLooseMatch[1];
+    var noLooseAll = text.match(/(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)[:：][\s\S]*?\d{8,20}/g);
+    if (noLooseAll) {
+      var bestNo = '';
+      for (var _ni = 0; _ni < noLooseAll.length; _ni++) {
+        // Extract all digit sequences of 8-20 digits from each match
+        var _digitMatches = noLooseAll[_ni].match(/\d{8,20}/g);
+        if (_digitMatches) {
+          for (var _di = 0; _di < _digitMatches.length; _di++) {
+            if (_digitMatches[_di].length > bestNo.length) {
+              bestNo = _digitMatches[_di];
+            }
+          }
+        }
+      }
+      // Only accept if >= 10 digits (credit code prefixes are typically 8 digits,
+      // invoice numbers are 10-20 digits)
+      if (bestNo.length >= 10) result.invoiceNo = bestNo;
+    }
   }
   // Pattern 4: Coordinate-based (for PDFs with label/value in separate blocks)
   if (!result.invoiceNo && words && words.length > 0) {
@@ -2358,9 +2379,6 @@ function extractByCoordinates(ocrResult) {
       taxAmount = 0;
     }
 
-    // Non-tax invoices: don't show buyer name
-    buyerName = '';
-
     // Credit code belongs to buyer (交款人), not seller
     if (sellerCreditCode && !buyerCreditCode) {
       buyerCreditCode = sellerCreditCode;
@@ -2371,7 +2389,7 @@ function extractByCoordinates(ocrResult) {
     return { amountTax: amountTax, amountNoTax: amountNoTax, taxAmount: 0,
              sellerName: sellerName, sellerCreditCode: sellerCreditCode,
              invoiceNo: invoiceNo, invoiceDate: invoiceDate,
-             buyerName: '', buyerCreditCode: buyerCreditCode,
+             buyerName: buyerName, buyerCreditCode: buyerCreditCode,
              _ocrText: fullText, isTicket: false, isNonTax: true };
   }
 

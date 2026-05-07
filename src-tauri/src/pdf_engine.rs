@@ -1277,23 +1277,176 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
     let page_content = doc.get_and_decode_page_content(page_id)
         .map_err(|e| format!("PDF内容流解码失败: {}", e))?;
 
+    // Build a mapping: XObject name → Form XObject ObjectId
+    // This is needed to match "Do" operations in the page content to their Form XObjects.
+    let mut xobj_name_to_id: std::collections::HashMap<Vec<u8>, lopdf::ObjectId> = std::collections::HashMap::new();
+    {
+        if let Ok(page_dict) = doc.get_dictionary(page_id) {
+            if let Ok(resources) = page_dict.get(b"Resources") {
+                let resolved_res = match resources {
+                    lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok(),
+                    _ => resources.as_dict().ok(),
+                };
+                if let Some(res_dict) = resolved_res {
+                    if let Ok(xobj_val) = res_dict.get(b"XObject") {
+                        let resolved_xobj = match xobj_val {
+                            lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok(),
+                            _ => xobj_val.as_dict().ok(),
+                        };
+                        if let Some(xobj_dict) = resolved_xobj {
+                            for (xobj_name, xobj_ref) in xobj_dict.iter() {
+                                if let lopdf::Object::Reference(id) = xobj_ref {
+                                    xobj_name_to_id.insert(xobj_name.clone(), *id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan the page content to find cm operations that precede Do operations for Form XObjects.
+    // Pattern: q [cm] /Name Do Q
+    // We record the cm parameters for each Form XObject name so we can apply them when
+    // processing the Form XObject's content.
+    let mut form_cm_params: std::collections::HashMap<Vec<u8>, [f64; 6]> = std::collections::HashMap::new();
+    {
+        let ops = &page_content.operations;
+        let mut i = 0;
+        while i < ops.len() {
+            // Look for "Do" operations
+            if ops[i].operator == "Do" {
+                if let Some(name_obj) = ops[i].operands.first() {
+                    if let lopdf::Object::Name(name) = name_obj {
+                        // Check if this Do references a Form XObject
+                        if xobj_name_to_id.contains_key(name) {
+                            // Look backwards for a preceding "cm" operation (skip "q" if present)
+                            let j = if i > 0 && ops[i - 1].operator == "cm" { i - 1 }
+                                        else if i > 1 && ops[i - 1].operator == "q" && ops[i - 2].operator == "cm" { i - 2 }
+                                        else { i };
+                            if j < i && ops[j].operator == "cm" && ops[j].operands.len() == 6 {
+                                let params: Vec<f64> = ops[j].operands.iter().map(|o| match o {
+                                    lopdf::Object::Real(r) => *r as f64,
+                                    lopdf::Object::Integer(n) => *n as f64,
+                                    _ => 0.0,
+                                }).collect();
+                                form_cm_params.insert(name.clone(), [params[0], params[1], params[2], params[3], params[4], params[5]]);
+                                log::info!("PDF文本提取: Form XObject {:?} 的页面级cm: {:?}", String::from_utf8_lossy(name), params);
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     let content = if !form_xobject_ids.is_empty() {
-        // Append Form XObject text operations to the page-level content
-        let mut combined_ops = page_content.operations.clone();
+        // Build combined content: page operations (with Do/cm/q/Q for Form XObjects removed)
+        // followed by Form XObject content wrapped in q/cm/[content]/Q.
+        let mut combined_ops: Vec<lopdf::content::Operation> = Vec::new();
+        let ops = &page_content.operations;
+        let mut i = 0;
+        while i < ops.len() {
+            let op = &ops[i];
+            // Detect patterns: q? cm? /Name Do Q? — skip them from page content
+            // and we'll insert Form XObject content separately after page content.
+            if op.operator == "Do" {
+                if let Some(name_obj) = op.operands.first() {
+                    if let lopdf::Object::Name(name) = name_obj {
+                        if xobj_name_to_id.contains_key(name) {
+                            // This Do references a Form XObject — skip it.
+                            // Also skip preceding q/cm and following Q.
+                            // Remove preceding q and cm if they were for this Do.
+                            if combined_ops.len() >= 2 {
+                                let last2 = &combined_ops[combined_ops.len() - 2..];
+                                if last2[0].operator == "cm" && last2[1].operator == "q" {
+                                    combined_ops.truncate(combined_ops.len() - 2);
+                                } else if last2[1].operator == "cm" {
+                                    combined_ops.truncate(combined_ops.len() - 1);
+                                } else if combined_ops.last().map_or(false, |o| o.operator == "q") {
+                                    combined_ops.truncate(combined_ops.len() - 1);
+                                }
+                            }
+                            // Skip following Q if present
+                            if i + 1 < ops.len() && ops[i + 1].operator == "Q" {
+                                i += 1;
+                            }
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            combined_ops.push(op.clone());
+            i += 1;
+        }
+
+        // Now append Form XObject content with proper cm transformations.
+        // For each Form XObject, insert: q [page_cm] [form_matrix_cm] [content] Q
         for fxobj_id in &form_xobject_ids {
             if let Ok(obj) = doc.get_object(*fxobj_id) {
                 if let Ok(stream) = obj.as_stream() {
+                    // Find the XObject name for this Form XObject (to look up page-level cm)
+                    let fxobj_name = xobj_name_to_id.iter()
+                        .find(|(_, id)| *id == fxobj_id)
+                        .map(|(name, _)| name.clone());
+
+                    // Insert q (save graphics state)
+                    combined_ops.push(lopdf::content::Operation {
+                        operator: "q".into(),
+                        operands: vec![],
+                    });
+
+                    // Insert page-level cm (from the page content, before the Do)
+                    if let Some(ref name) = fxobj_name {
+                        if let Some(cm) = form_cm_params.get(name) {
+                            // Only insert if not identity
+                            if !(cm[0] == 1.0 && cm[1] == 0.0 && cm[2] == 0.0 && cm[3] == 1.0 && cm[4] == 0.0 && cm[5] == 0.0) {
+                                combined_ops.push(lopdf::content::Operation {
+                                    operator: "cm".into(),
+                                    operands: cm.iter().map(|&v| lopdf::Object::Real(v as f32)).collect(),
+                                });
+                            }
+                        }
+                    }
+
+                    // Insert Form XObject's Matrix as cm (if not identity)
+                    let form_matrix: [f64; 6] = stream.dict.get(b"Matrix")
+                        .and_then(|m| m.as_array())
+                        .map(|arr| {
+                            let vals: Vec<f64> = arr.iter().map(|o| match o {
+                                lopdf::Object::Real(r) => *r as f64,
+                                lopdf::Object::Integer(n) => *n as f64,
+                                _ => 0.0,
+                            }).collect();
+                            if vals.len() == 6 { [vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]] }
+                            else { [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] }
+                        })
+                        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+                    if !(form_matrix[0] == 1.0 && form_matrix[1] == 0.0 && form_matrix[2] == 0.0 && form_matrix[3] == 1.0 && form_matrix[4] == 0.0 && form_matrix[5] == 0.0) {
+                        combined_ops.push(lopdf::content::Operation {
+                            operator: "cm".into(),
+                            operands: form_matrix.iter().map(|&v| lopdf::Object::Real(v as f32)).collect(),
+                        });
+                        log::info!("PDF文本提取: Form XObject Matrix: {:?}", form_matrix);
+                    }
+
+                    // Append Form XObject content
                     if let Ok(decompressed) = stream.decompressed_content() {
-                        // Fix literal strings in Form XObject content: escape backslash bytes.
-                        // PDF producers sometimes embed raw 0x5C bytes in literal strings without
-                        // proper escaping. lopdf interprets 0x5C as escape start (e.g., \t → TAB),
-                        // which corrupts 2-byte CID alignment for Identity-H encoded fonts.
-                        // Fix: scan the raw bytes and escape any unescaped 0x5C inside literal strings.
                         let fixed_bytes = escape_backslashes_in_literal_strings(&decompressed);
                         if let Ok(form_content) = lopdf::content::Content::decode(&fixed_bytes) {
                             combined_ops.extend(form_content.operations);
                         }
                     }
+
+                    // Insert Q (restore graphics state)
+                    combined_ops.push(lopdf::content::Operation {
+                        operator: "Q".into(),
+                        operands: vec![],
+                    });
                 }
             }
         }
@@ -1319,6 +1472,13 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
     let mut current_font: Vec<u8> = Vec::new();
     let mut in_text_block = false;
 
+    // CTM (Current Transformation Matrix) tracking: [a, b, c, d, e, f]
+    // In PDF, the CTM transforms coordinates from user space to device space.
+    // For text extraction, we apply the CTM to text positions to get correct page coordinates.
+    // Default is identity: x' = x, y' = y.
+    // General transform: x' = a*x + c*y + e, y' = b*x + d*y + f
+    let mut ctm: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
     // Graphics state stack for q/Q
     #[derive(Clone)]
     struct GfxState {
@@ -1328,6 +1488,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
         font_size: f64,
         leading: f64,
         font_name: Vec<u8>,
+        ctm: [f64; 6],
     }
     let mut state_stack: Vec<GfxState> = Vec::new();
 
@@ -1354,6 +1515,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                 state_stack.push(GfxState {
                     x: cur_x, y: cur_y, line_start_x,
                     font_size, leading, font_name: current_font.clone(),
+                    ctm,
                 });
             }
             "Q" => {
@@ -1364,7 +1526,29 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                     font_size = state.font_size;
                     leading = state.leading;
                     current_font = state.font_name;
+                    ctm = state.ctm;
                 }
+            }
+            "cm" if op.operands.len() == 6 => {
+                // Concatenate Matrix: a b c d e f cm
+                // Multiplies the current CTM with the new matrix.
+                // CTM = CTM × M, where M = [a b c d e f]
+                let m: [f64; 6] = op.operands.iter().map(|o| match o {
+                    Object::Real(r) => *r as f64, Object::Integer(n) => *n as f64, _ => 0.0
+                }).collect::<Vec<_>>().try_into().unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+                let [a1, b1, c1, d1, e1, f1] = ctm;
+                let [a2, b2, c2, d2, e2, f2] = m;
+                ctm = [
+                    a1*a2 + b1*c2,  // new_a
+                    a1*b2 + b1*d2,  // new_b
+                    c1*a2 + d1*c2,  // new_c
+                    c1*b2 + d1*d2,  // new_d
+                    e1*a2 + f1*c2 + e2, // new_e
+                    e1*b2 + f1*d2 + f2, // new_f
+                ];
+                log::debug!("PDF文本提取: cm操作 [{:.1} {:.1} {:.1} {:.1} {:.1} {:.1}], CTM更新为 [{:.1} {:.1} {:.1} {:.1} {:.1} {:.1}]",
+                    m[0], m[1], m[2], m[3], m[4], m[5],
+                    ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5]);
             }
             "Tf" if op.operands.len() >= 2 => {
                 // Font selection: /FontName size
@@ -1436,7 +1620,9 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                 if let Some(obj) = op.operands.first() {
                     if let Some(decoded) = decode_text_object(obj, &lopdf_encodings, &tounicode_cmaps, &current_font, &font_encoding_names) {
                         if !decoded.is_empty() {
-                            let word = make_word(&decoded, cur_x, cur_y, font_size, page_h_pt, scale);
+                            // Apply CTM to get page coordinates
+                            let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
+                            let word = make_word(&decoded, px, py, font_size, page_h_pt, scale);
                             all_words.push(word);
                             if need_space_before { full_text_parts.push(" ".to_string()); }
                             full_text_parts.push(decoded.clone());
@@ -1466,7 +1652,8 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                                 let kern_f = *kern as f64;
                                 // Only flush on large negative kern (word break)
                                 if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
-                                    let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                                    let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
+                                    let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
                                     all_words.push(word);
                                     if need_space_before { full_text_parts.push(" ".to_string()); }
                                     full_text_parts.push(text_buf.clone());
@@ -1480,7 +1667,8 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                             Object::Real(kern) => {
                                 let kern_f = *kern as f64;
                                 if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
-                                    let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                                    let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
+                                    let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
                                     all_words.push(word);
                                     if need_space_before { full_text_parts.push(" ".to_string()); }
                                     full_text_parts.push(text_buf.clone());
@@ -1495,7 +1683,8 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                     }
                     // Flush remaining text
                     if !text_buf.is_empty() {
-                        let word = make_word(&text_buf, cur_x, cur_y, font_size, page_h_pt, scale);
+                        let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
+                        let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
                         all_words.push(word);
                         if need_space_before { full_text_parts.push(" ".to_string()); }
                         full_text_parts.push(text_buf);
@@ -1522,6 +1711,17 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
 /// Create a PdfTextWord with coordinate conversion (PDF pt → frontend px).
 /// PDF coordinates: origin bottom-left, y-up.
 /// Frontend coordinates: origin top-left, y-down.
+/// Apply CTM (Current Transformation Matrix) to a point.
+/// CTM = [a, b, c, d, e, f] represents:
+///   | a  b  0 |
+///   | c  d  0 |
+///   | e  f  1 |
+/// Transform: x' = a*x + c*y + e, y' = b*x + d*y + f
+fn apply_ctm(ctm: &[f64; 6], x: f64, y: f64) -> (f64, f64) {
+    let [a, b, c, d, e, f] = *ctm;
+    (a * x + c * y + e, b * x + d * y + f)
+}
+
 fn make_word(text: &str, pdf_x: f64, pdf_y: f64, font_size: f64,
              page_h_pt: f32, scale: f64) -> PdfTextWord {
     let w = approximate_text_width(text, font_size) * scale;
