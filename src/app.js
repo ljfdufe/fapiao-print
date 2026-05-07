@@ -825,13 +825,17 @@ function loadFileFromDataUrlFast(fd) {
                 pdfPath: r._pdfPath,
                 pageIdx: r._pdfPageIdx
               }).then(function(pdfText) {
-                if (pdfText) {
+                if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
                   applyPdfTextResult(r, pdfText);
                   updateFileItem(r);
                   updateAmountSummary();
+                } else if (hasOcr && !S.feat.ocrEnabled) {
+                  console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
+                  applyOcrAsync(r, r.previewUrl);
                 }
               }).catch(function(err) {
                 console.warn('[PDF文字提取] 失败，将回退OCR:', err);
+                if (hasOcr && !S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
               });
             });
             // Queue OCR for each page in background — fallback for scanned PDFs

@@ -1815,14 +1815,24 @@ function _findNearbyAmount(words, kw, opts) {
  * Returns: 'vat' | 'ticket' | 'ride' | 'unknown'
  */
 function _detectInvoiceType(words, imgW, imgH) {
-  // Check for train ticket keywords in top 60%
-  var topWords = words.filter(function(w) { return w.ny < 0.6; });
-  var topText = topWords.map(function(w) { return w.normText; }).join('');
-  if (/(?:车\s*次|票\s*价|座\s*位|席\s*别|检\s*票|进\s*站|出\s*站|铁\s*路|乘\s*车|二\s*等|一\s*等|动\s*车|高\s*铁)/.test(topText)) {
+  // Build full text from all words (not just top 60%) for more reliable detection
+  var allText = words.map(function(w) { return w.normText; }).join('');
+  // Check for train ticket keywords — scan ALL words (not just top 60%)
+  // because PDF text extraction may have different layout than OCR,
+  // and ticket-specific keywords (票价, 车次, 二等座, etc.) can be anywhere.
+  // Also check for "铁路电子客票" / "电子客票号" which are definitive ticket markers.
+  if (/(?:车\s*次|票\s*价|座\s*位|席\s*别|检\s*票|进\s*站|出\s*站|铁\s*路|乘\s*车|二\s*等|一\s*等|动\s*车|高\s*铁|电\s*子\s*客\s*票\s*号|铁\s*路\s*电\s*子\s*客\s*票)/.test(allText)) {
     return 'ticket';
   }
+  // Also check: has "购买方名称:" but no "销售方" — likely a ticket (not VAT)
+  if (/购买方\s*名\s*称/.test(allText) && !/销售方/.test(allText)) {
+    // Confirm with secondary ticket markers
+    if (/(?:车次|票价|座|站|客票)/.test(allText)) {
+      return 'ticket';
+    }
+  }
   // Check for ride-hailing keywords
-  if (/(?:出\s*租|打\s*车|网\s*约|滴\s*滴|专\s*车|客\s*运\s*服\s*务)/.test(topText)) {
+  if (/(?:出\s*租|打\s*车|网\s*约|滴\s*滴|专\s*车|客\s*运\s*服\s*务)/.test(allText)) {
     return 'ride';
   }
   // Check for VAT invoice structure: "价税合计" or "购买方"+"销售方"
@@ -2038,22 +2048,36 @@ function extractByCoordinates(ocrResult) {
     // Tickets don't have a traditional seller — override with ticket type label
     sellerName = getTicketTypeLabel(fullText);
 
-    // Method 1: "票价:" keyword → nearby amount or inline amount
-    var priceLabels = _findWords(words, /票\s*价/);
-    for (var pi = 0; pi < priceLabels.length && !amountTax; pi++) {
-      // Try inline amount first: "票价:￥41.00" or "票价：¥41.00" (keyword+amount in one word)
-      var inlineMatch = priceLabels[pi].text.match(/票\s*价[：:]*\s*[￥¥]\s*(\d+\.\d{2})/);
-      if (inlineMatch) {
-        var inlineVal = parseFloat(inlineMatch[1]);
-        if (inlineVal >= 1 && inlineVal <= 50000) {
-          amountTax = inlineVal;
-        }
+    // Method 0: Text-based ticket price extraction (most reliable for PDF text layer)
+    // Pattern: "票价:94.00" or "票价：¥94.00" — label and value may be on same line
+    var normFullText = _normTextForExtract(fullText);
+    var ticketPriceTextMatch = normFullText.match(/票\s*价[：:]*\s*¥?\s*(\d+\.\d{2})/);
+    if (ticketPriceTextMatch) {
+      var tpv = parseFloat(ticketPriceTextMatch[1]);
+      if (tpv >= 1 && tpv <= 50000) {
+        amountTax = tpv;
+        console.log('[车票提取] 文本Pattern匹配票价:', tpv);
       }
-      // Fallback: nearby separate amount word
-      if (!amountTax) {
-        var amt = _findNearbyAmount(words, priceLabels[pi], { maxDx: 300, maxDy: 30, maxDyBelow: 80 });
-        if (amt && amt.value >= 5 && amt.value <= 5000) {
-          amountTax = amt.value;
+    }
+
+    // Method 1: "票价:" keyword → nearby amount or inline amount
+    if (!amountTax) {
+      var priceLabels = _findWords(words, /票\s*价/);
+      for (var pi = 0; pi < priceLabels.length && !amountTax; pi++) {
+        // Try inline amount first: "票价:￥41.00" or "票价：¥41.00" (keyword+amount in one word)
+        var inlineMatch = priceLabels[pi].text.match(/票\s*价[：:]*\s*[￥¥]\s*(\d+\.\d{2})/);
+        if (inlineMatch) {
+          var inlineVal = parseFloat(inlineMatch[1]);
+          if (inlineVal >= 1 && inlineVal <= 50000) {
+            amountTax = inlineVal;
+          }
+        }
+        // Fallback: nearby separate amount word — use larger search radius for PDF text
+        if (!amountTax) {
+          var amt = _findNearbyAmount(words, priceLabels[pi], { maxDx: 500, maxDy: 50, maxDyBelow: 120 });
+          if (amt && amt.value >= 1 && amt.value <= 50000) {
+            amountTax = amt.value;
+          }
         }
       }
     }
@@ -2061,23 +2085,24 @@ function extractByCoordinates(ocrResult) {
     if (!amountTax) {
       var discountLabels = _findWords(words, /全\s*价|优\s*惠\s*价|学\s*生\s*价/);
       for (var di = 0; di < discountLabels.length && !amountTax; di++) {
-        var amt2 = _findNearbyAmount(words, discountLabels[di], { maxDx: 300, maxDy: 30, maxDyBelow: 80 });
-        if (amt2 && amt2.value >= 5 && amt2.value <= 5000) {
+        var amt2 = _findNearbyAmount(words, discountLabels[di], { maxDx: 500, maxDy: 50, maxDyBelow: 120 });
+        if (amt2 && amt2.value >= 1 && amt2.value <= 50000) {
           amountTax = amt2.value;
         }
       }
     }
-    // Method 2: Positional — ¥ amount in ticket area (nx < 0.5, ny 0.35~0.65)
-    // Also handles "票价:￥41.00" style inline amounts (keyword+value in one word)
+    // Method 2: Positional — amount near ticket price area
+    // PDF text layout may differ from OCR — expand search area
     if (!amountTax) {
       var ticketAmounts = words.filter(function(w) {
         if (w.confidence < 0.3) return false;
-        if (w.nx > 0.55 || w.ny < 0.3 || w.ny > 0.65) return false;
+        // Expand vertical range for PDF text: ny 0.2~0.8 (was 0.3~0.65)
+        if (w.ny < 0.2 || w.ny > 0.8) return false;
         var t = w.normText.replace(/[,，]/g, '');
         var m = t.match(/^-?¥?(\d+\.\d{2})$/);
         if (!m) return false;
         var v = parseFloat(m[1]);
-        return v >= 5 && v <= 5000 && !isLikelyYearOrDate(v, t);
+        return v >= 5 && v <= 50000 && !isLikelyYearOrDate(v, t);
       });
       if (ticketAmounts.length > 0) {
         // Take the largest
@@ -2103,9 +2128,32 @@ function extractByCoordinates(ocrResult) {
         }
       }
     }
+    // Method 3: Last resort — find standalone price amount in full text
+    // For tickets, the price is usually a simple number like "94.00"
+    if (!amountTax) {
+      var standalonePriceMatch = normFullText.match(/(\d+\.\d{2})/g);
+      if (standalonePriceMatch) {
+        // Filter to reasonable ticket prices (5~50000) and pick largest
+        var priceCandidates = standalonePriceMatch
+          .map(function(s) { return parseFloat(s); })
+          .filter(function(v) { return v >= 5 && v <= 50000 && !isLikelyYearOrDate(v, v.toString()); });
+        if (priceCandidates.length > 0) {
+          priceCandidates.sort(function(a, b) { return b - a; });
+          amountTax = priceCandidates[0];
+          console.log('[车票提取] 最后兜底金额:', amountTax);
+        }
+      }
+    }
     if (amountTax > 0) amountNoTax = amountTax;
 
     console.log('[坐标提取] 车票金额:', amountTax);
+    // Fix: For tickets, the sole credit code belongs to buyer (not seller).
+    // The coordinate-based assignment in _extractByText may assign it to seller
+    // because ticket layout differs from VAT invoice.
+    if (sellerCreditCode && !buyerCreditCode) {
+      buyerCreditCode = sellerCreditCode;
+      sellerCreditCode = '';
+    }
     return { amountTax: amountTax, amountNoTax: amountNoTax, taxAmount: 0,
              sellerName: sellerName, sellerCreditCode: sellerCreditCode,
              invoiceNo: invoiceNo, invoiceDate: invoiceDate,

@@ -1074,6 +1074,7 @@ pub struct PdfTextResult {
     pub lines: Vec<PdfTextLine>,
     pub img_w: u32, // Page width in frontend pixels
     pub img_h: u32, // Page height in frontend pixels
+    pub has_text_layer: bool, // true if PDF has text content in content stream
 }
 
 /// Extract text with coordinates from a PDF page's content stream.
@@ -1099,83 +1100,201 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
     let page_w_px = (page_w_pt as f64 * scale) as u32;
     let page_h_px = (page_h_pt as f64 * scale) as u32;
 
-    // Get font encodings and ToUnicode CMaps for text decoding
-    let fonts = doc.get_page_fonts(page_id).unwrap_or_default();
-    let mut encodings: std::collections::BTreeMap<Vec<u8>, lopdf::Encoding> = std::collections::BTreeMap::new();
+    // Collect ToUnicode CMaps for CID font text decoding.
+    // We use our own CMap parser (not lopdf's Encoding) to avoid lifetime issues
+    // with borrowed references from the Document.
     let mut tounicode_cmaps: std::collections::BTreeMap<Vec<u8>, CMap> = std::collections::BTreeMap::new();
-    
-    for (name, font_dict) in fonts {
-        // Get font encoding
-        if let Ok(enc) = font_dict.get_font_encoding(&doc) {
-            encodings.insert(name.clone(), enc);
+    // Also collect lopdf Encodings for non-CID fonts (WinAnsi, Standard, etc.)
+    // These borrow from the Document, so they must be used within this function scope.
+    let mut lopdf_encodings: std::collections::BTreeMap<Vec<u8>, lopdf::Encoding> = std::collections::BTreeMap::new();
+    // Collect raw Encoding names for fonts that lopdf can't decode (e.g., GBK-EUC-H).
+    // Key = font name bytes, Value = encoding name bytes (e.g., b"GBK-EUC-H")
+    let mut font_encoding_names: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+
+    // Helper: load ToUnicode CMap from a font dictionary, also record encoding name
+    fn load_cmap_from_font(
+        doc: &lopdf::Document,
+        font_dict: &lopdf::Dictionary,
+    ) -> Option<CMap> {
+        let tounicode = font_dict.get(b"ToUnicode").ok()?;
+        let resolved_obj = match tounicode {
+            lopdf::Object::Reference(xref) => doc.get_object(*xref).ok()?,
+            obj => obj,
+        };
+        let content_bytes = match &resolved_obj {
+            lopdf::Object::Stream(s) => s.content.as_slice(),
+            _ => resolved_obj.as_stream().ok()?.content.as_slice(),
+        };
+        let cmap_bytes = match &resolved_obj {
+            lopdf::Object::Stream(s) => s.decompressed_content().unwrap_or_else(|_| content_bytes.to_vec()),
+            _ => {
+                if content_bytes.starts_with(&[0x78, 0x01]) ||
+                   content_bytes.starts_with(&[0x78, 0x9C]) ||
+                   content_bytes.starts_with(&[0x78, 0xDA]) {
+                    flate2::read::ZlibDecoder::new(content_bytes).bytes().collect::<Result<Vec<_>, _>>()
+                        .unwrap_or_else(|_| content_bytes.to_vec())
+                } else {
+                    content_bytes.to_vec()
+                }
+            }
+        };
+        if let Ok(content) = String::from_utf8(cmap_bytes.clone()) {
+            if let Some(cmap) = parse_cmap(&content) {
+                return Some(cmap);
+            }
         }
-        
-        // Get ToUnicode CMap if available
-        if let Ok(tounicode) = font_dict.get(b"ToUnicode") {
-            if let lopdf::Object::Reference(xref) = tounicode {
-                if let Ok(obj) = doc.get_object(*xref) {
-                    if let Ok(stream) = obj.as_stream() {
-                        let content_bytes = stream.content.as_slice();
-                        
-                        // Try to decompress if it looks like compressed data (zlib header)
-                        let cmap_bytes = if content_bytes.starts_with(&[0x78, 0x01]) || 
-                                           content_bytes.starts_with(&[0x78, 0x9C]) || 
-                                           content_bytes.starts_with(&[0x78, 0xDA]) {
-                            eprintln!("[DEBUG] Attempting zlib decompression");
-                            match flate2::read::ZlibDecoder::new(content_bytes).bytes().collect::<Result<Vec<_>, _>>() {
-                                Ok(decompressed) => {
-                                    eprintln!("[DEBUG] Decompression successful, length: {}", decompressed.len());
-                                    decompressed
-                                }
-                                Err(e) => {
-                                    eprintln!("[DEBUG] Zlib decompression failed: {}", e);
-                                    content_bytes.to_vec()
-                                }
-                            }
-                        } else {
-                            content_bytes.to_vec()
+        let content = String::from_utf8_lossy(&cmap_bytes);
+        parse_cmap(&content)
+    }
+
+    // Step 1: Load fonts from page-level Resources
+    let page_fonts = doc.get_page_fonts(page_id).unwrap_or_default();
+    for (name, font_dict) in &page_fonts {
+        // Record the raw Encoding name for GBK/CJK decoding fallback
+        if let Ok(enc_name) = font_dict.get(b"Encoding").and_then(|e| e.as_name().map(|n| n.to_vec())) {
+            font_encoding_names.insert(name.clone(), enc_name);
+        }
+        // Try lopdf's get_font_encoding first (handles WinAnsi, Identity-H→CMap, etc.)
+        if let Ok(enc) = font_dict.get_font_encoding(&doc) {
+            lopdf_encodings.insert(name.clone(), enc);
+        }
+        // Also try our own CMap parser (works for all CID fonts with ToUnicode)
+        if let Some(cmap) = load_cmap_from_font(&doc, font_dict) {
+            tounicode_cmaps.insert(name.clone(), cmap);
+        }
+    }
+
+    // Step 2: If page-level fonts are empty, look for Form XObjects
+    // and load fonts from their embedded Resources.
+    // Some PDFs (e.g., OFD→PDF by Suwell) put all fonts inside Form XObject resources,
+    // while the page-level Resources only has the XObject reference.
+    let mut form_xobject_ids: Vec<lopdf::ObjectId> = Vec::new();
+    if lopdf_encodings.is_empty() && tounicode_cmaps.is_empty() {
+        if let Ok(page_dict) = doc.get_dictionary(page_id) {
+            if let Ok(resources) = page_dict.get(b"Resources") {
+                let resolved_res = match resources {
+                    lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok(),
+                    _ => resources.as_dict().ok(),
+                };
+                if let Some(res_dict) = resolved_res {
+                    // Check XObject dictionary for Form XObjects
+                    if let Ok(xobj_val) = res_dict.get(b"XObject") {
+                        let resolved_xobj = match xobj_val {
+                            lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok(),
+                            _ => xobj_val.as_dict().ok(),
                         };
-                        
-                        // Debug: print first 200 chars of CMap content
-                        let debug_preview: String = cmap_bytes.iter()
-                            .take(200)
-                            .map(|&b| if b >= 32 && b < 127 { b as char } else { '?' })
-                            .collect();
-                        eprintln!("[DEBUG] CMap content preview: {}", debug_preview);
-                        
-                        // Try UTF-8 first
-                        if let Ok(content) = String::from_utf8(cmap_bytes.clone()) {
-                            eprintln!("[DEBUG] UTF-8 decode success, length: {}", content.len());
-                            if let Some(cmap) = parse_cmap(&content) {
-                                eprintln!("[DEBUG] CMap parsed successfully, mappings: {}", cmap.mappings.len());
-                                tounicode_cmaps.insert(name.clone(), cmap);
-                                continue;
-                            } else {
-                                eprintln!("[DEBUG] CMap parse failed for UTF-8");
+                        if let Some(xobj_dict) = resolved_xobj {
+                            for (_xobj_name, xobj_ref) in xobj_dict.iter() {
+                                let xobj_id = match xobj_ref {
+                                    lopdf::Object::Reference(id) => Some(*id),
+                                    _ => None,
+                                };
+                                if let Some(id) = xobj_id {
+                                    if let Ok(obj) = doc.get_object(id) {
+                                        if let Ok(stream) = obj.as_stream() {
+                                            // Check if this is a Form XObject
+                                            let subtype = stream.dict.get(b"Subtype")
+                                                .and_then(|s| s.as_name()).ok();
+                                            if subtype == Some(b"Form") {
+                                                form_xobject_ids.push(id);
+                                                // Get fonts from Form XObject's Resources
+                                                if let Ok(form_res) = stream.dict.get(b"Resources") {
+                                                    let resolved_form_res = match form_res {
+                                                        lopdf::Object::Reference(rid) => doc.get_dictionary(*rid).ok(),
+                                                        _ => form_res.as_dict().ok(),
+                                                    };
+                                                    if let Some(form_res_dict) = resolved_form_res {
+                                                        if let Ok(form_font_dict) = form_res_dict.get(b"Font") {
+                                                            let resolved_fonts = match form_font_dict {
+                                                                lopdf::Object::Reference(rid) => doc.get_dictionary(*rid).ok(),
+                                                                _ => form_font_dict.as_dict().ok(),
+                                                            };
+                                                            if let Some(fonts_dict) = resolved_fonts {
+                                                                for (fname, fref) in fonts_dict.iter() {
+                                                                    let font_dict = match fref {
+                                                                        lopdf::Object::Reference(fid) => doc.get_dictionary(*fid).ok(),
+                                                                        lopdf::Object::Dictionary(d) => Some(d),
+                                                                        _ => None,
+                                                                    };
+                                                                    if let Some(fd) = font_dict {
+                                                                        // Record raw Encoding name for GBK/CJK fallback
+                                                                        if let Ok(enc_name) = fd.get(b"Encoding").and_then(|e| e.as_name().map(|n| n.to_vec())) {
+                                                                            font_encoding_names.insert(fname.clone(), enc_name);
+                                                                        }
+                                                                        if let Ok(enc) = fd.get_font_encoding(&doc) {
+                                                                            lopdf_encodings.insert(fname.clone(), enc);
+                                                                        }
+                                                                        if let Some(cmap) = load_cmap_from_font(&doc, fd) {
+                                                                            tounicode_cmaps.insert(fname.clone(), cmap);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                        } else {
-                            eprintln!("[DEBUG] UTF-8 decode failed");
-                        }
-                        // Try Latin-1 as fallback
-                        let content = String::from_utf8_lossy(&cmap_bytes);
-                        if let Some(cmap) = parse_cmap(&content) {
-                            eprintln!("[DEBUG] CMap parsed successfully from Latin-1");
-                            tounicode_cmaps.insert(name.clone(), cmap);
-                        } else {
-                            eprintln!("[DEBUG] CMap parse failed for Latin-1");
                         }
                     }
                 }
             }
         }
     }
-    
-    // Debug: log CMap parsing status
-    eprintln!("[DEBUG] Loaded {} ToUnicode CMaps", tounicode_cmaps.len());
 
-    // Decode page content stream
-    let content = doc.get_and_decode_page_content(page_id)
+    // Debug: write log file
+    let _debug_log_path = std::env::temp_dir().join("fapiao_text_extract_debug.txt");
+    let mut _debug_log = String::new();
+    _debug_log.push_str(&format!("PDF: {}, page: {}\n", pdf_path, page_idx));
+    _debug_log.push_str(&format!("LopdfEncodings: {}, CMaps: {}, FormXObjs: {}\n",
+        lopdf_encodings.len(), tounicode_cmaps.len(), form_xobject_ids.len()));
+    let _ = std::fs::write(&_debug_log_path, &_debug_log);
+
+    log::info!("PDF文本提取: {} lopdf encodings, {} ToUnicode CMaps, {} Form XObjects",
+        lopdf_encodings.len(), tounicode_cmaps.len(), form_xobject_ids.len());
+
+    // Get the content stream to parse
+    // If page content only has "Do" (Form XObject invocation), expand the Form XObject content
+    let page_content = doc.get_and_decode_page_content(page_id)
         .map_err(|e| format!("PDF内容流解码失败: {}", e))?;
+
+    let has_page_text = page_content.operations.iter().any(|op| {
+        op.operator == "Tj" || op.operator == "TJ"
+    });
+
+    let content = if !has_page_text && !form_xobject_ids.is_empty() {
+        // Page content has no text ops — try to get content from Form XObjects
+        let mut combined_ops: Vec<lopdf::content::Operation> = Vec::new();
+        for fxobj_id in &form_xobject_ids {
+            if let Ok(obj) = doc.get_object(*fxobj_id) {
+                if let Ok(stream) = obj.as_stream() {
+                    if let Ok(decompressed) = stream.decompressed_content() {
+                        if let Ok(form_content) = lopdf::content::Content::decode(&decompressed) {
+                            combined_ops.extend(form_content.operations);
+                        }
+                    }
+                }
+            }
+        }
+        if combined_ops.is_empty() {
+            page_content
+        } else {
+            lopdf::content::Content { operations: combined_ops }
+        }
+    } else {
+        page_content
+    };
+
+    // Check if content stream has any text operations (BT...ET with Tj/TJ)
+    let has_text_ops = content.operations.iter().any(|op| {
+        op.operator == "Tj" || op.operator == "TJ"
+    });
+    if !has_text_ops {
+        log::info!("PDF文本提取: 页面无文本操作(扫描件)，需OCR回退");
+    }
 
     // State tracking for text position
     let mut cur_x: f64 = 0.0;
@@ -1301,7 +1420,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
             "Tj" if in_text_block => {
                 // Show text string
                 if let Some(obj) = op.operands.first() {
-                    if let Some(decoded) = decode_text_object(obj, &encodings, &tounicode_cmaps, &current_font) {
+                    if let Some(decoded) = decode_text_object(obj, &lopdf_encodings, &tounicode_cmaps, &current_font, &font_encoding_names) {
                         if !decoded.is_empty() {
                             let word = make_word(&decoded, cur_x, cur_y, font_size, page_h_pt, scale);
                             all_words.push(word);
@@ -1324,7 +1443,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
                     for item in arr {
                         match item {
                             Object::String(bytes, _format) => {
-                                if let Some(decoded) = decode_bytes_with_encoding(bytes, &encodings, &tounicode_cmaps, &current_font) {
+                                if let Some(decoded) = decode_bytes_with_encoding(bytes, &lopdf_encodings, &tounicode_cmaps, &current_font, &font_encoding_names) {
                                     text_buf.push_str(&decoded);
                                 }
                             }
@@ -1382,6 +1501,7 @@ pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, 
         lines,
         img_w: page_w_px,
         img_h: page_h_px,
+        has_text_layer: has_text_ops,
     })
 }
 
@@ -1439,17 +1559,18 @@ fn decode_text_object(
     encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
     cmaps: &std::collections::BTreeMap<Vec<u8>, CMap>,
     font_name: &[u8],
+    encoding_names: &std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
 ) -> Option<String> {
     match obj {
         lopdf::Object::String(bytes, _format) => {
-            decode_bytes_with_encoding(bytes, encodings, cmaps, font_name)
+            decode_bytes_with_encoding(bytes, encodings, cmaps, font_name, encoding_names)
         }
         lopdf::Object::Array(arr) => {
             // Some PDFs use arrays in Tj
             let mut result = String::new();
             for item in arr {
                 if let lopdf::Object::String(bytes, _fmt) = item {
-                    if let Some(decoded) = decode_bytes_with_encoding(bytes, encodings, cmaps, font_name) {
+                    if let Some(decoded) = decode_bytes_with_encoding(bytes, encodings, cmaps, font_name, encoding_names) {
                         result.push_str(&decoded);
                     }
                 }
@@ -1515,15 +1636,30 @@ fn parse_cmap(content: &str) -> Option<CMap> {
         // Parse beginbfchar / endbfchar
         if token == "beginbfchar" {
             i += 1;
-            while i + 1 < tokens.len() && tokens[i] != "endbfchar" {
-                let glyph_str = tokens[i];
-                let unicode_str = tokens[i + 1];
-                if let (Some(glyph), Some(ch)) = (parse_hex_pair(glyph_str), parse_hex_pair(unicode_str)) {
-                    if let Some(unicode_char) = std::char::from_u32(ch as u32) {
-                        cmap.add_mapping(glyph, unicode_char);
+            while i < tokens.len() && tokens[i] != "endbfchar" {
+                // Each entry may be "<glyph> <unicode>" (two tokens)
+                // or "<glyph><unicode>" (one token with concatenated hex pairs)
+                let parts = split_hex_pairs(tokens[i]);
+                if parts.len() >= 2 {
+                    if let (Some(glyph), Some(ch)) = (parse_hex_pair(parts[0]), parse_hex_pair(parts[1])) {
+                        if let Some(unicode_char) = std::char::from_u32(ch as u32) {
+                            cmap.add_mapping(glyph, unicode_char);
+                        }
                     }
+                    i += 1;
+                } else if i + 1 < tokens.len() {
+                    // Two separate tokens
+                    let glyph_str = tokens[i];
+                    let unicode_str = tokens[i + 1];
+                    if let (Some(glyph), Some(ch)) = (parse_hex_pair(glyph_str), parse_hex_pair(unicode_str)) {
+                        if let Some(unicode_char) = std::char::from_u32(ch as u32) {
+                            cmap.add_mapping(glyph, unicode_char);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
                 }
-                i += 2;
             }
             i += 1; // Skip "endbfchar"
         }
@@ -1531,15 +1667,34 @@ fn parse_cmap(content: &str) -> Option<CMap> {
         // Parse beginbfrange / endbfrange
         else if token == "beginbfrange" {
             i += 1;
-            while i + 2 < tokens.len() && tokens[i] != "endbfrange" {
-                let start_str = tokens[i];
-                let end_str = tokens[i + 1];
-                let unicode_start_str = tokens[i + 2];
-                if let (Some(start), Some(end), Some(unicode_start)) = 
-                    (parse_hex_pair(start_str), parse_hex_pair(end_str), parse_hex_pair(unicode_start_str)) {
-                    cmap.add_range(start, end, unicode_start);
+            while i < tokens.len() && tokens[i] != "endbfrange" {
+                // Each entry may be "<start> <end> <unicode>" (three tokens)
+                // or "<start><end><unicode>" (one token with concatenated hex pairs)
+                // or "<start> <end><unicode>" etc.
+                let mut all_parts = Vec::new();
+                // Collect hex pairs from current token and possibly next tokens
+                let mut j = i;
+                while all_parts.len() < 3 && j < tokens.len() && tokens[j] != "endbfrange" {
+                    let parts = split_hex_pairs(tokens[j]);
+                    if !parts.is_empty() {
+                        all_parts.extend(parts);
+                    } else {
+                        // Might be a standalone hex pair token
+                        if let Some(_) = parse_hex_pair(tokens[j]) {
+                            all_parts.push(tokens[j]);
+                        }
+                    }
+                    j += 1;
+                    // If we already have 3 parts, stop
+                    if all_parts.len() >= 3 { break; }
                 }
-                i += 3;
+                if all_parts.len() >= 3 {
+                    if let (Some(start), Some(end), Some(unicode_start)) = 
+                        (parse_hex_pair(all_parts[0]), parse_hex_pair(all_parts[1]), parse_hex_pair(all_parts[2])) {
+                        cmap.add_range(start, end, unicode_start);
+                    }
+                }
+                i = j;
             }
             i += 1; // Skip "endbfrange"
         }
@@ -1548,7 +1703,7 @@ fn parse_cmap(content: &str) -> Option<CMap> {
     }
     
     // Debug: log parsing result
-    eprintln!("[DEBUG] CMap parsed: {} mappings, {} ranges", cmap.mappings.len(), cmap.ranges.len());
+    log::debug!("CMap parsed: {} mappings, {} ranges", cmap.mappings.len(), cmap.ranges.len());
     
     // If we found any mappings, return the CMap
     if !cmap.mappings.is_empty() || !cmap.ranges.is_empty() {
@@ -1569,17 +1724,72 @@ fn parse_hex_pair(s: &str) -> Option<u16> {
     }
 }
 
+/// Split a string like "<0005><0007><0031>" into individual hex pairs ["<0005>", "<0007>", "<0031>"]
+fn split_hex_pairs(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = None;
+    for (i, c) in s.char_indices() {
+        if c == '<' {
+            start = Some(i);
+        } else if c == '>' {
+            if let Some(s_idx) = start {
+                result.push(&s[s_idx..=i]);
+                start = None;
+            }
+        }
+    }
+    result
+}
+
 /// Decode raw bytes using the font's encoding.
 fn decode_bytes_with_encoding(
     bytes: &[u8],
     encodings: &std::collections::BTreeMap<Vec<u8>, lopdf::Encoding>,
     cmaps: &std::collections::BTreeMap<Vec<u8>, CMap>,
     font_name: &[u8],
+    encoding_names: &std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
 ) -> Option<String> {
     // Try the font's encoding first
     if let Some(encoding) = encodings.get(font_name) {
         if let Ok(text) = encoding.bytes_to_string(bytes) {
             return Some(text);
+        }
+    }
+
+    // Try GBK/EUC CJK encoding fallback — lopdf returns Err for these SimpleEncodings.
+    // Common CJK CMap names: GBK-EUC-H, GBK-EUC-V, GBKp-EUC-H, GBKp-EUC-V,
+    //   ETen-B5-H, ETen-B5-V, etc.
+    // Note: UniGB-UCS2-H and UniGB-UTF16-H are UTF-16 encodings handled by lopdf's
+    // bytes_to_string (they succeed), so we don't need to handle them here.
+    // Only handle EUC-based CJK encodings that lopdf can't decode.
+    if let Some(enc_name) = encoding_names.get(font_name) {
+        let enc_str = String::from_utf8_lossy(enc_name);
+        // GBK-EUC-H/V, GBKp-EUC-H/V — GBK byte encoding
+        let is_gbk_euc = enc_str.starts_with("GBK");
+        // ETen-B5-H/V, B5pc-H/V — Big5 byte encoding
+        let is_big5_euc = enc_str.starts_with("ETen") || enc_str.starts_with("B5pc");
+        // 90ms-RKSJ-H/V, 83pv-RKSJ-H/V — Shift_JIS (Japanese)
+        let _is_sjis = enc_str.contains("RKSJ") || enc_str.contains("90ms") || enc_str.contains("83pv");
+        // KSC-EUC-H/V, KSCms-UHC-H/V — EUC-KR/UHC (Korean)
+        let _is_korean = enc_str.starts_with("KSC");
+        if is_gbk_euc {
+            // Decode as GBK (GB18030 compatible, covers GB2312/GBK)
+            let (cow, _encoding_used, _had_errors) = encoding_rs::GBK.decode(bytes);
+            let text = cow.into_owned();
+            if !text.is_empty() && text.chars().any(|c| is_cjk(c) || c.is_alphanumeric()) {
+                log::debug!("GBK decode for font {:?} (encoding {}): {} chars",
+                    String::from_utf8_lossy(font_name), enc_str, text.chars().count());
+                return Some(text);
+            }
+        } else if is_big5_euc {
+            // Decode as Big5 (Traditional Chinese)
+            let (cow, _encoding_used, _had_errors) = encoding_rs::BIG5.decode(bytes);
+            let text = cow.into_owned();
+            if !text.is_empty() && text.chars().any(|c| is_cjk(c) || c.is_alphanumeric()) {
+                log::debug!("BIG5 decode for font {:?} (encoding {}): {} chars",
+                    String::from_utf8_lossy(font_name), enc_str, text.chars().count());
+                return Some(text);
+            }
         }
     }
 

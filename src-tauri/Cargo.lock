@@ -1341,6 +1341,7 @@ version = "1.9.4"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
+ "encoding_rs",
  "flate2",
  "image",
  "kamadak-exif",
