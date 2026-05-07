@@ -704,19 +704,21 @@ function _cleanName(raw) {
   // Remove leading whitespace/colons
   name = name.replace(/^[\s:：]+/, '');
   // Skip if it's a label itself or non-company text
-  if (/^(?:购买方信息|销售方信息|购买方|销售方|名称|信息|纳税人|地址|电话|开户行|账号|项目名称|规格型号)$/.test(name)) return '';
+  if (/^(?:购买方信息|销售方信息|购买方|销售方|名称|信息|纳税人|地址|电话|开户行|账号|项目名称|规格型号|交款人)$/.test(name)) return '';
   // Skip table header terms and section labels
-  if (/^(?:单价|数量|金额|税率|税额|合\s*计|大\s*写|小\s*写|备\s*注|出行人|证件号|出行日期|出发地|到达地|等\s*级|交通工具|开票人|收款人|复核人|价税合计)$/.test(name)) return '';
+  if (/^(?:单价|数量|金额|税率|税额|合\s*计|大\s*写|小\s*写|备\s*注|出行人|证件号|出行日期|出发地|到达地|等\s*级|交通工具|开票人|收款人|复核人|价税合计|金额合计|收款单位|校验码|票据代码|票据号码|项目编码|项目名称|单位|标准)$/.test(name)) return '';
   // Skip metadata/watermark annotations (download count, verification count, etc.)
   if (/^(?:下载|查验|开具|打印)次数/.test(name)) return '';
   // Skip concatenated table headers (e.g., "单价数量", "金额税率", "项目名称单价")
-  if (/^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|备\s*注|价税合计)/.test(name) && name.length <= 8) return '';
+  if (/^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|备\s*注|价税合计|金额合计)/.test(name) && name.length <= 8) return '';
   // Skip invoice type labels — these are NOT company names
-  if (/^(?:电子发票|增值税专用发票|普通发票|增值税电子普通发票|增值税电子专用发票|价税合计|小写|大写)$/.test(name)) return '';
+  if (/^(?:电子发票|增值税专用发票|普通发票|增值税电子普通发票|增值税电子专用发票|价税合计|金额合计|小写|大写)$/.test(name)) return '';
   if (/^电子发票[（(]/.test(name)) return '';
   if (/电子发票.*增值税专用发票/.test(name)) return '';
   if (/电子发票.*普通发票/.test(name)) return '';
-  if (/价税合计.*大写/.test(name)) return '';
+  if (/(?:价税合计|金额合计).*大写/.test(name)) return '';
+  // Non-tax invoice titles (e.g., "江苏省非税收入统一票据（电子）")
+  if (/非税收入.*票据/.test(name)) return '';
   // Must contain CJK and be at least 2 chars
   if (name.length < 2 || !/[\u4e00-\u9fff]/.test(name)) return '';
   return name;
@@ -1118,33 +1120,42 @@ function _extractByText(fullText, words) {
   var text = _normTextForExtract(fullText);
 
   // --- Invoice number ---
-  // Pattern 1: Same line (standard format)
-  var noMatch = text.match(/发\s*票\s*号\s*码[:\s]*(\d{8,20})/);
+  // Pattern 1: Same line (standard format — "发票号码" or "票据号码" for non-tax invoices)
+  var noMatch = text.match(/(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)[:\s]*(\d{8,20})/);
   if (noMatch) result.invoiceNo = noMatch[1];
   // Pattern 2: Cross-line (label and value on separate lines)
   // e.g., "发票号码：\n25322000000337005189"
   if (!result.invoiceNo) {
-    var noCrossMatch = text.match(/发\s*票\s*号\s*码[:：\s]*\n\s*(\d{8,20})/);
+    var noCrossMatch = text.match(/(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)[:：\s]*\n\s*(\d{8,20})/);
     if (noCrossMatch) result.invoiceNo = noCrossMatch[1];
   }
   // Pattern 3: Loose cross-line (label and value separated by multiple lines)
   // e.g., "发票号码：\n...\n25322000000337005189"
   if (!result.invoiceNo) {
-    var noLooseMatch = text.match(/发\s*票\s*号\s*码[:：][\s\S]*?(\d{8,20})/);
+    var noLooseMatch = text.match(/(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)[:：][\s\S]*?(\d{8,20})/);
     if (noLooseMatch) result.invoiceNo = noLooseMatch[1];
   }
   // Pattern 4: Coordinate-based (for PDFs with label/value in separate blocks)
   if (!result.invoiceNo && words && words.length > 0) {
-    result.invoiceNo = _findValueByLabelCoords(words, /发\s*票\s*号\s*码/, /\d{8,20}/);
+    result.invoiceNo = _findValueByLabelCoords(words, /(?:发\s*票\s*号\s*码|票\s*据\s*号\s*码|票\s*据\s*号\s*码)/, /\d{8,20}/);
   }
 
   // --- Invoice date ---
-  // Pattern 1: Same line (standard format)
+  // Pattern 1: Same line (standard format: YYYY年MM月DD日)
   var dateMatch = text.match(/开\s*票\s*日\s*期[:\s]*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   if (dateMatch) {
     result.invoiceDate = dateMatch[1] + '-' +
       dateMatch[2].padStart(2, '0') + '-' +
       dateMatch[3].padStart(2, '0');
+  }
+  // Pattern 1b: Same line, YYYY-MM-DD format (non-tax invoices: "开票日期：2026-04-28")
+  if (!result.invoiceDate) {
+    var dateDashMatch = text.match(/开\s*票\s*日\s*期[:\s]*(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (dateDashMatch) {
+      result.invoiceDate = dateDashMatch[1] + '-' +
+        dateDashMatch[2].padStart(2, '0') + '-' +
+        dateDashMatch[3].padStart(2, '0');
+    }
   }
   // Pattern 2: Cross-line (label and value on separate lines)
   // e.g., "开票日期：\n2025年07月22日"
@@ -1196,7 +1207,8 @@ function _extractByText(fullText, words) {
 
   // --- Buyer/Seller names ---
   // Priority 1: Explicit labels "购买方名称：" / "销售方名称：" (same line)
-  var buyerLabelMatch = text.match(/购\s*买\s*方(?:信息)?名\s*称[:\s]*([^\n]+)/);
+  // Also handles non-tax invoices: "交款人：" for buyer
+  var buyerLabelMatch = text.match(/(?:购\s*买\s*方(?:信息)?名\s*称|交\s*款\s*人\s*[:：])\s*([^\n]+)/);
   if (buyerLabelMatch) {
     var bn = _cleanName(buyerLabelMatch[1]);
     if (bn) result.buyerName = bn;
@@ -1291,16 +1303,24 @@ function _extractByText(fullText, words) {
       if (!result.buyerCreditCode) result.buyerCreditCode = _tracedCodes[0].code;
       if (!result.sellerCreditCode) result.sellerCreditCode = _tracedCodes[1].code;
     }
-    if (_tracedCodes.length === 1 && !result.sellerCreditCode) {
-      result.sellerCreditCode = _tracedCodes[0].code;
+    if (_tracedCodes.length === 1) {
+      // Single code: check label context to determine buyer vs seller
+      // "交款人统一社会信用代码" → buyer (non-tax invoice)
+      // Otherwise → seller (standard VAT invoice: personal buyer has no credit code)
+      var _tcLabelText2 = ccLabelWords[0] ? (ccLabelWords[0].text || ccLabelWords[0].normText) : '';
+      if (/交\s*款\s*人/.test(_tcLabelText2)) {
+        if (!result.buyerCreditCode) result.buyerCreditCode = _tracedCodes[0].code;
+      } else {
+        if (!result.sellerCreditCode) result.sellerCreditCode = _tracedCodes[0].code;
+      }
     }
   }
 
   // Method 2: Text regex fallback (only if coordinate method didn't find both codes)
+  var codes = [];
+  var ccPositions = [];
   if (!result.buyerCreditCode || !result.sellerCreditCode) {
     var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
-    var codes = [];
-    var ccPositions = [];
     var cm;
     while ((cm = ccRegex.exec(text)) !== null) {
       var code = cm[1].toUpperCase();
@@ -1316,8 +1336,15 @@ function _extractByText(fullText, words) {
       if (!result.buyerCreditCode) result.buyerCreditCode = codes[0];
       if (!result.sellerCreditCode) result.sellerCreditCode = codes[1];
     } else if (codes.length === 1) {
-      // Single credit code → belongs to seller (personal buyer has no credit code)
-      if (!result.sellerCreditCode) result.sellerCreditCode = codes[0];
+      // Single credit code — check context:
+      // "交款人统一社会信用代码" → buyer (non-tax invoice)
+      // Otherwise → seller (personal buyer has no credit code in VAT invoices)
+      var singleCodeLabel = text.substring(Math.max(0, ccPositions[0] - 20), ccPositions[0]);
+      if (/交\s*款\s*人/.test(singleCodeLabel)) {
+        if (!result.buyerCreditCode) result.buyerCreditCode = codes[0];
+      } else {
+        if (!result.sellerCreditCode) result.sellerCreditCode = codes[0];
+      }
     }
   }
 
@@ -1477,9 +1504,9 @@ function _extractAmountsByText(fullText) {
       }
     }
   }
-  // Pattern 2: Find last ¥ amount after "价税合计"
+  // Pattern 2: Find last ¥ amount after "价税合计" or "金额合计" (non-tax invoices)
   if (!result.amountTax) {
-    var jshjIdx = text.search(/价\s*税\s*合\s*计/);
+    var jshjIdx = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjIdx >= 0) {
       var afterJshj = text.substring(jshjIdx);
       var jshjAmtRe = /¥\s*(\d[\d,]*\.\d{2})/g;
@@ -1496,9 +1523,9 @@ function _extractAmountsByText(fullText) {
       console.log('[Phase1] Pattern2未找到"价税合计"');
     }
   }
-  // Pattern 2b: Bare amount after "价税合计" (no ¥, no 小写)
+  // Pattern 2b: Bare amount after "价税合计" or "金额合计" (no ¥, no 小写)
   if (!result.amountTax) {
-    var jshjIdx2 = text.search(/价\s*税\s*合\s*计/);
+    var jshjIdx2 = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjIdx2 >= 0) {
       var afterJshj2 = text.substring(jshjIdx2);
       var bareJshj = afterJshj2.match(/[）\)][：:]*\s*(\d[\d,]*\.\d{2})/);
@@ -1517,8 +1544,7 @@ function _extractAmountsByText(fullText) {
     if (xiaoxiePos >= 0) {
       console.log('[Phase1] "小写"位置:', xiaoxiePos, '上下文:', JSON.stringify(text.substring(Math.max(0, xiaoxiePos - 5), xiaoxiePos + 30)));
     }
-    var jshjPos = text.indexOf('价税合计');
-    if (jshjPos < 0) jshjPos = text.search(/价\s*税\s*合\s*计/);
+    var jshjPos = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
     if (jshjPos >= 0) {
       console.log('[Phase1] "价税合计"位置:', jshjPos, '上下文:', JSON.stringify(text.substring(jshjPos, jshjPos + 50)));
     }
@@ -1531,8 +1557,8 @@ function _extractAmountsByText(fullText) {
   if (!result.amountTax) {
     // Look for Chinese numeral characters after "价税合计（大写）" or standalone after "大写"
     var daxiePatterns = [
-      // "价税合计（大写）捌仟捌佰壹拾玖圆陆角整"
-      /价\s*税\s*合\s*计[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
+      // "价税合计（大写）捌仟捌佰壹拾玖圆陆角整" or "金额合计（大写）壹仟叁佰贰拾元整"
+      /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
       // "（大写）捌仟捌佰壹拾玖圆陆角整" (after 价税合计 on a different line)
       /[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
       // "大写：捌仟捌佰壹拾玖圆陆角整"
@@ -1663,9 +1689,9 @@ function _extractAmountsByText(fullText) {
     }
 
     if (hejiStandaloneIdx >= 0) {
-      var jshjSearchIdx = text.indexOf('价税合计', hejiStandaloneIdx);
-      if (jshjSearchIdx < 0) {
-        var jshjAfter = text.substring(hejiStandaloneIdx).search(/价\s*税\s*合\s*计/);
+      var jshjSearchIdx = text.search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/, hejiStandaloneIdx);
+      if (jshjSearchIdx < 0 || jshjSearchIdx < hejiStandaloneIdx) {
+        var jshjAfter = text.substring(hejiStandaloneIdx).search(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
         jshjSearchIdx = jshjAfter >= 0 ? hejiStandaloneIdx + jshjAfter : text.length;
       }
       var section = text.substring(hejiStandaloneIdx, jshjSearchIdx);
@@ -1935,8 +1961,8 @@ function _detectInvoiceType(words, imgW, imgH) {
   if (/(?:出\s*租|打\s*车|网\s*约|滴\s*滴|专\s*车|客\s*运\s*服\s*务)/.test(allText)) {
     return 'ride';
   }
-  // Check for VAT invoice structure: "价税合计" or "购买方"+"销售方"
-  var hasJiaShui = _findWords(words, /价\s*税\s*合\s*计/).length > 0;
+  // Check for VAT invoice structure: "价税合计"/"金额合计" or "购买方"+"销售方"
+  var hasJiaShui = _findWords(words, /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/).length > 0;
   var hasBuyerSeller = _findWords(words, /购买方/).length > 0 && _findWords(words, /销售方/).length > 0;
   if (hasJiaShui || hasBuyerSeller) return 'vat';
 
@@ -2096,7 +2122,7 @@ function _extractSeller(words, imgW, imgH) {
       sellerName = '';
     }
     // Reject table header terms (单价, 数量, 金额, etc.)
-    if (/^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|价税合计)$/.test(sellerName)) {
+    if (/^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|价税合计|金额合计)$/.test(sellerName)) {
       sellerName = '';
     }
     if (sellerName.length < 2) sellerName = '';
@@ -2280,7 +2306,7 @@ function extractByCoordinates(ocrResult) {
   // If sellerName from text extraction looks like a table header or non-company text,
   // clear it so that coordinate-based fallback can find the real company name.
   if (sellerName) {
-    var _badSellerPatterns = /^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|大\s*写|小\s*写|备\s*注|价税合计|出行人|开票人|收款人|复核人)/;
+    var _badSellerPatterns = /^(?:单价|数量|金额|税率|税额|项目名称|规格型号|合\s*计|大\s*写|小\s*写|备\s*注|价税合计|金额合计|出行人|开票人|收款人|复核人)/;
     if (_badSellerPatterns.test(sellerName) && sellerName.length <= 8) {
       console.log('[校验] sellerName疑似表头文本，已清除:', sellerName);
       sellerName = '';
@@ -2327,11 +2353,11 @@ function extractByCoordinates(ocrResult) {
   // --- Amount extraction (coordinate-based FALLBACK) ---
   // Only runs when text-based extraction didn't find the amounts.
 
-  // Step 1: 价税合计（含税总价）— coordinate-based FALLBACK
+  // Step 1: 价税合计/金额合计（含税总价）— coordinate-based FALLBACK
   // Location: ny ≈ 0.20~0.30 (near bottom of invoice)
-  // Keywords: "价税合计", "（小写）", or just ¥ at that position
+  // Keywords: "价税合计", "金额合计" (non-tax), "（小写）", or just ¥ at that position
   if (!amountTax) {
-  var jshjLabels = _findWords(words, /价\s*税\s*合\s*计/);
+  var jshjLabels = _findWords(words, /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
   if (jshjLabels.length > 0) {
     // Use the LOWEST "价税合计" label (bottom of invoice = 含税价, not 不含税)
     jshjLabels.sort(function(a, b) { return b.ny - a.ny; });
@@ -2570,8 +2596,8 @@ function extractByCoordinates(ocrResult) {
       var _daxieBestDist = Infinity;
       // Find "大写" label
       var _daxieLabels = _findWords(words, /大\s*写/);
-      // Also check for "价税合计" as anchor
-      var _jshjLabels = _findWords(words, /价\s*税\s*合\s*计/);
+      // Also check for "价税合计" or "金额合计" as anchor
+      var _jshjLabels = _findWords(words, /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/);
       var _anchors = _daxieLabels.concat(_jshjLabels);
 
       for (var _di = 0; _di < _daxieWords.length; _di++) {
@@ -2629,10 +2655,10 @@ function extractByCoordinates(ocrResult) {
 
   // --- Simple regex fallback (only when coordinates couldn't resolve) ---
   if (!amountTax) {
-    amountTax = _regexFindLast('价\\s*税\\s*合\\s*计', normText);
+    amountTax = _regexFindLast('(?:价\\s*税\\s*合\\s*计|金\\s*额\\s*合\\s*计)', normText);
   }
   if (!amountNoTax && amountTax > 0) {
-    var workText = normText.replace(/价\s*税\s*合\s*计[\s\S]*?\d+\.\d{2}/g, '');
+    var workText = normText.replace(/(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)[\s\S]*?\d+\.\d{2}/g, '');
     var hejiNum = _regexFindFirst('合\\s*计', workText);
     if (hejiNum > 0 && Math.abs(hejiNum - amountTax) > 0.01) amountNoTax = hejiNum;
   }
@@ -2676,6 +2702,10 @@ function extractByCoordinates(ocrResult) {
   }
   if (amountNoTax > 0 && amountTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && taxAmount > 0) {
     taxAmount = 0;
+  }
+  // Non-tax invoices: no tax, so amountNoTax = amountTax
+  if (amountTax > 0 && !amountNoTax && !_taxAmountResolved) {
+    amountNoTax = amountTax;
   }
   if (amountNoTax > 0 && !amountTax) {
     if (taxAmount > 0 && taxAmount < amountNoTax) {
