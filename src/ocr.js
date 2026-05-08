@@ -973,6 +973,42 @@ function _extractNamesByCoords(words, result) {
   var nameLabels = words.filter(function(w) {
     return /^名\s*称[:：]/.test(w.text) || /^名\s*称[:：]/.test(w.normText);
   });
+
+  // CJK split-character fallback: when PDF text layer splits "名称" into separate
+  // single-char words ("名" and "称"), find adjacent pairs and synthesize virtual labels.
+  // This is common in dzcp-format PDFs where each CJK character is a standalone word.
+  if (nameLabels.length === 0) {
+    var mingWords = words.filter(function(w) {
+      return (w.text === '名' || w.normText === '名') && w.w < w.h * 3;
+    });
+    var chengWords = words.filter(function(w) {
+      return (w.text === '称' || w.normText === '称') && w.w < w.h * 3;
+    });
+    for (var mi = 0; mi < mingWords.length; mi++) {
+      var mw = mingWords[mi];
+      for (var ci = 0; ci < chengWords.length; ci++) {
+        var cw = chengWords[ci];
+        // "称" should be to the right of "名" and on the same line
+        var dx = cw.x - (mw.x + mw.w);
+        var dy = Math.abs(cw.y - mw.y);
+        if (dx >= -mw.h * 0.5 && dx <= mw.h * 2 && dy <= mw.h * 0.5) {
+          // Synthesize a virtual label word from the pair
+          var virtualLabel = {
+            text: '名称', normText: '名称',
+            x: mw.x, y: Math.min(mw.y, cw.y),
+            w: (cw.x + cw.w) - mw.x, h: Math.max(mw.h, cw.h),
+            cx: (mw.cx + cw.cx) / 2, cy: (mw.cy + cw.cy) / 2,
+            nx: (mw.nx + cw.nx) / 2, ny: (mw.ny + cw.ny) / 2,
+            confidence: Math.min(mw.confidence || 0.9, cw.confidence || 0.9),
+            _isVirtual: true, _srcWords: [mw, cw]
+          };
+          nameLabels.push(virtualLabel);
+          break; // each "名" matches at most one "称"
+        }
+      }
+    }
+  }
+
   if (nameLabels.length === 0) return;
 
   // Extract inline name values from fused "名称:公司名" words
@@ -994,6 +1030,43 @@ function _extractNamesByCoords(words, result) {
   var creditLabels = words.filter(function(w) {
     return /统一社会(?:信用代码)?|纳税人识别号/.test(w.text) || /统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
   });
+
+  // CJK split-char fallback for credit labels: find adjacent "统"+"一"+"社"+"会" single-char
+  // words that form "统一社会" when reading left-to-right on the same line.
+  if (creditLabels.length === 0) {
+    var tongWords = words.filter(function(w) {
+      return (w.text === '统' || w.normText === '统') && w.w < w.h * 3;
+    });
+    for (var _ti = 0; _ti < tongWords.length; _ti++) {
+      var _tw = tongWords[_ti];
+      // Find "一" to the right of "统" on the same line
+      var yiWords = words.filter(function(w) {
+        return (w.text === '一' || w.normText === '一') && w.w < w.h * 3 &&
+               Math.abs(w.y - _tw.y) <= _tw.h * 0.5 && w.x >= _tw.x - _tw.h * 0.5;
+      });
+      for (var _yi = 0; _yi < yiWords.length; _yi++) {
+        var _yw = yiWords[_yi];
+        // Find "社" to the right of "一"
+        var sheWords = words.filter(function(w) {
+          return (w.text === '社' || w.normText === '社') && w.w < w.h * 3 &&
+                 Math.abs(w.y - _yw.y) <= _yw.h * 0.5 && w.x >= _yw.x - _yw.h * 0.5;
+        });
+        if (sheWords.length > 0) {
+          // Found "统一社" — synthesize virtual credit label
+          var _sw = sheWords[0];
+          var virtualCreditLabel = {
+            text: '统一社会', normText: '统一社会',
+            x: _tw.x, y: _tw.y, w: (_sw.x + _sw.w) - _tw.x, h: _tw.h,
+            cx: (_tw.cx + _sw.cx) / 2, cy: (_tw.cy + _sw.cy) / 2,
+            nx: (_tw.nx + _sw.nx) / 2, ny: (_tw.ny + _sw.ny) / 2,
+            confidence: Math.min(_tw.confidence || 0.9, _yw.confidence || 0.9, _sw.confidence || 0.9)
+          };
+          creditLabels.push(virtualCreditLabel);
+          break;
+        }
+      }
+    }
+  }
 
   var foundNames = [];
   // Add inline name results first (from "名称:公司名" fused words)
@@ -1018,6 +1091,8 @@ function _extractNamesByCoords(words, result) {
     for (var wi = 0; wi < words.length; wi++) {
       var w = words[wi];
       if (w === label) continue;
+      // For virtual (synthesized) labels from CJK split chars, also skip the source words
+      if (label._srcWords && label._srcWords.indexOf(w) >= 0) continue;
 
       // ENFORCE REGION BOUNDARY: only collect words on the SAME SIDE as the label.
       // This is the critical fix — without it, "名称：" on the left half would also
@@ -1035,7 +1110,7 @@ function _extractNamesByCoords(words, result) {
       var isInYRange = isBelowOrSameLine || includeAbove;
       var isNotLabel = !/^名\s*称[:：]/.test(w.text) && !/^名\s*称[:：]/.test(w.normText);
       var isNotCreditLabel = !/统一社会(?:信用代码)?|纳税人识别号/.test(w.text) && !/统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
-      var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通)$/.test(w.normText);
+      var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.normText);
       // Filter out metadata/watermark words (download count, verification count, etc.)
       var isNotMetadata = !/^(?:下载|查验|开具|打印)次数/.test(w.text) && !/^(?:下载|查验|开具|打印)次数/.test(w.normText);
       // Filter out words that look like credit codes (18-char alphanumeric with letters)
@@ -2026,6 +2101,37 @@ function _detectInvoiceType(words, imgW, imgH) {
   var hasJiaShui = _findWords(words, /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)/).length > 0;
   var hasBuyerSeller = _findWords(words, /购买方/).length > 0 && _findWords(words, /销售方/).length > 0;
   if (hasJiaShui || hasBuyerSeller) return 'vat';
+
+  // CJK split-character fallback: when PDF text layer splits multi-char keywords into
+  // separate single-char words (e.g., "价","税","合","计" instead of "价税合计"),
+  // check allText which concatenates all normText values.
+  // This handles dzcp-format PDFs where every CJK character is a standalone word.
+  if (/价\s*税\s*合\s*计|金\s*额\s*合\s*计/.test(allText)) return 'vat';
+  if (/购买方/.test(allText) && /销售方/.test(allText)) return 'vat';
+
+  // CJK split-char spatial fallback: when allText concatenation doesn't preserve visual order
+  // (PDF content stream order ≠ visual order), check for the presence of key characters
+  // in approximately correct spatial positions.
+  // For "价税合计": check if "价" exists in the lower half of the invoice (ny > 0.15)
+  var jiaWords = words.filter(function(w) {
+    return (w.text === '价' || w.normText === '价') && w.ny > 0.15 && w.w < w.h * 3;
+  });
+  if (jiaWords.length > 0) {
+    // Check if "合计" components exist nearby (same or adjacent line)
+    var heWords = words.filter(function(w) {
+      return (w.text === '合' || w.normText === '合') && w.w < w.h * 3;
+    });
+    var jiWords = words.filter(function(w) {
+      return (w.text === '计' || w.normText === '计') && w.w < w.h * 3;
+    });
+    // If "合" and "计" are near "价" (within 5 lines vertically), it's likely 价税合计
+    for (var _ji = 0; _ji < jiaWords.length; _ji++) {
+      var _jw = jiaWords[_ji];
+      var _heNear = heWords.some(function(hw) { return Math.abs(hw.ny - _jw.ny) < 0.05; });
+      var _jiNear = jiWords.some(function(jw) { return Math.abs(jw.ny - _jw.ny) < 0.05; });
+      if (_heNear && _jiNear) return 'vat';
+    }
+  }
 
   return 'unknown';
 }
