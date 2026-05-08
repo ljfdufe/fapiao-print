@@ -2835,7 +2835,10 @@ function extractByCoordinates(ocrResult) {
         if (!m) continue;
         var v = parseFloat(m[1]);
         if (v > 0 && v < 1000000 && !isLikelyYearOrDate(v, t)) {
-          rowAmts.push(v);
+          // 守卫：amountTax已知时，排除超过它2倍以上的异常值（防止多列数字被合并）
+          if (!amountTax || v <= amountTax * 2) {
+            rowAmts.push(v);
+          }
         }
       }
 
@@ -2886,7 +2889,12 @@ function extractByCoordinates(ocrResult) {
     // Use the bottommost "税额" (in the 合计 row)
     seLabels.sort(function(a, b) { return b.ny - a.ny; });
     var amt7 = _findNearbyAmount(words, seLabels[0], { maxDx: 300, maxDy: 30, maxDyBelow: 60 });
-    if (amt7) taxAmount = amt7.value;
+    // 守卫：税额不可能超过含税总价
+    if (amt7 && (!amountTax || amt7.value <= amountTax)) {
+      taxAmount = amt7.value;
+    } else if (amt7) {
+      console.log('[Step3守卫] 税额候选值(' + amt7.value + ')超过amountTax(' + amountTax + ')，已丢弃');
+    }
   }
   } // end if (!taxAmount)
 
@@ -2997,7 +3005,13 @@ function extractByCoordinates(ocrResult) {
   }
   if (!_taxAmountResolved && amountTax > 0) {
     var _taxByRegex = _regexFindFirst('税\\s*额', normText);
-    if (_taxByRegex > 0) { taxAmount = _taxByRegex; _taxAmountResolved = true; }
+    // 守卫：税额不可能超过含税总价
+    if (_taxByRegex > 0 && (!amountTax || _taxByRegex <= amountTax)) {
+      taxAmount = _taxByRegex;
+      _taxAmountResolved = true;
+    } else if (_taxByRegex > amountTax) {
+      console.log('[正则回退守卫] 税额候选值(' + _taxByRegex + ')超过amountTax(' + amountTax + ')，已丢弃');
+    }
   }
 
   // --- Cross-derivation after fallback ---
@@ -3029,11 +3043,22 @@ function extractByCoordinates(ocrResult) {
     console.log('[不变量] 坐标amountNoTax(' + amountNoTax + ')超过文本amountTax(' + amountTax + ')，已清除');
     amountNoTax = 0;
   }
-  if (amountNoTax > 0 && amountTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && taxAmount > 0) {
-    taxAmount = 0;
+  // 0%税率发票（话费等）：不含税价≈含税价，税额必须为0
+  // 注意：amountNoTax可能已被上方清除，需同时检查当前值与含税价的关系
+  if (amountTax > 0 && taxAmount > 0) {
+    // 情况1：amountNoTax已被清除，但含税价和税额差异极大（税额不可能是含税价的300倍）
+    if (taxAmount > amountTax) {
+      console.log('[不变量] 坐标taxAmount(' + taxAmount + ')超过amountTax(' + amountTax + ')，已清除（不可能）');
+      taxAmount = 0;
+    }
+    // 情况2：含税价与不含税价极接近（0%税率），税额应清0
+    if (Math.abs(amountTax - taxAmount) < 0.01 || (amountNoTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01)) {
+      console.log('[不变量] 0%税率检测：amountTax≈amountNoTax，税额已清0');
+      taxAmount = 0;
+    }
   }
-  // Non-tax invoices: no tax, so amountNoTax = amountTax
-  if (amountTax > 0 && !amountNoTax && !_taxAmountResolved) {
+  // 非税发票/0%税率兜底：不含税价=含税价
+  if (amountTax > 0 && !amountNoTax) {
     amountNoTax = amountTax;
   }
   if (amountNoTax > 0 && !amountTax) {
@@ -3219,6 +3244,18 @@ function extractByCoordinates(ocrResult) {
         console.log('[校验] 信用代码左右位置颠倒，已交换');
       }
     }
+  }
+
+  // --- 最终守卫 ---
+  // taxAmount 不可能超过 amountTax（税额不可能大于含税总价）
+  if (taxAmount > amountTax) {
+    console.log('[最终守卫] taxAmount(' + taxAmount + ') > amountTax(' + amountTax + ')，强制清0');
+    taxAmount = 0;
+  }
+  // 0%税率（如话费发票）：amountNoTax≈amountTax 时税额必须为0
+  if (amountTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && taxAmount > 0) {
+    console.log('[最终守卫] 0%税率检测：amountNoTax≈amountTax，税额强制清0');
+    taxAmount = 0;
   }
 
   console.log('[坐标提取] 结果:', { amountTax: amountTax, amountNoTax: amountNoTax, taxAmount: taxAmount,
