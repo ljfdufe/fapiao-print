@@ -705,7 +705,7 @@ function _cleanName(raw) {
   // e.g., "无锡天鹏菜篮子工程有限公司91320200796148368W" → "无锡天鹏菜篮子工程有限公司"
   name = name.replace(/[A-Z0-9]{15,20}$/, '');
   // Trim at next label keyword (when OCR merges multiple labels into one line)
-  name = name.replace(/名\s*称[:：].*$/, '');
+  name = name.replace(/名\s*称\s*[:：].*$/, '');
   name = name.replace(/统一社会(?:信用代码)?.*$/, '');
   name = name.replace(/纳税人识别号.*$/, '');
   name = name.replace(/开户银行.*$/, '');
@@ -746,16 +746,17 @@ function _cleanName(raw) {
  */
 function _extractNamesCrossLine(text, result) {
   var lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+  console.log('[跨行提取] 行数:', lines.length, '含"名称"行数:', lines.filter(function(l) { return /名\s*称/.test(l); }).length);
 
   // Find all "名称：" positions (standalone label) and inline "名称:公司名"
   var nameLabels = [];
   var inlineNames = [];
   for (var i = 0; i < lines.length; i++) {
-    if (/^名\s*称[:：]?$/.test(lines[i])) {
+    if (/^名\s*称\s*[:：]?\s*$/.test(lines[i])) {
       nameLabels.push(i);
     } else {
       // Inline format: "名称:公司名" or "名称：公司名"
-      var inlineMatch = lines[i].match(/^名\s*称[:：]\s*(.+)$/);
+      var inlineMatch = lines[i].match(/^名\s*称\s*[:：]\s*(.+)$/);
       if (inlineMatch) {
         var inlineName = _cleanName(inlineMatch[1]);
         if (inlineName) {
@@ -794,7 +795,7 @@ function _extractNamesCrossLine(text, result) {
     var labelLine = nameLabels[i];
     if (labelLine + 1 < lines.length) {
       var nextLine = lines[labelLine + 1];
-      if (nextLine && !/^名\s*称[:：]?$/.test(nextLine) && !/^[\s:：]*$/.test(nextLine)) {
+      if (nextLine && !/^名\s*称\s*[:：]?\s*$/.test(nextLine) && !/^[\s:：]*$/.test(nextLine)) {
         var cleaned = _cleanName(nextLine);
         if (cleaned) {
           nameEntries.push({ labelLine: labelLine, valueLine: labelLine + 1, name: cleaned });
@@ -822,11 +823,11 @@ function _extractNamesCrossLine(text, result) {
   if (nameEntries.length === 0) return;
 
   // Find credit code positions to anchor buyer/seller determination
-  var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
+  var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
   var codes = [];
   var cm;
   while ((cm = ccRegex.exec(text)) !== null) {
-    var code = cm[1].toUpperCase();
+    var code = cm[1].replace(/\s+/g, '').toUpperCase();
     // Guard: skip pure-digit codes (likely invoice numbers, not credit codes)
     if (!/[A-Z]/.test(code)) continue;
     if (codes.indexOf(code) < 0) codes.push(code);
@@ -971,7 +972,7 @@ function _extractNamesByCoords(words, result) {
   if (!words || words.length === 0) return;
 
   var nameLabels = words.filter(function(w) {
-    return /^名\s*称[:：]/.test(w.text) || /^名\s*称[:：]/.test(w.normText);
+    return /^名\s*称\s*[:：]/.test(w.text) || /^名\s*称\s*[:：]/.test(w.normText);
   });
 
   // CJK split-character fallback: when PDF text layer splits "名称" into separate
@@ -984,6 +985,7 @@ function _extractNamesByCoords(words, result) {
     var chengWords = words.filter(function(w) {
       return (w.text === '称' || w.normText === '称') && w.w < w.h * 3;
     });
+    console.log('[名称虚拟标签] "名"字词数:', mingWords.length, '"称"字词数:', chengWords.length);
     for (var mi = 0; mi < mingWords.length; mi++) {
       var mw = mingWords[mi];
       for (var ci = 0; ci < chengWords.length; ci++) {
@@ -1017,7 +1019,7 @@ function _extractNamesByCoords(words, result) {
   for (var _ilni = 0; _ilni < nameLabels.length; _ilni++) {
     var _ilnWord = nameLabels[_ilni];
     var _ilnText = _ilnWord.text || _ilnWord.normText;
-    var _ilnMatch = _ilnText.match(/^名\s*称[:：]\s*(.+)$/);
+    var _ilnMatch = _ilnText.match(/^名\s*称\s*[:：]\s*(.+)$/);
     if (_ilnMatch && _ilnMatch[1].trim()) {
       var _ilnName = _cleanName(_ilnMatch[1]);
       if (_ilnName) {
@@ -1033,12 +1035,15 @@ function _extractNamesByCoords(words, result) {
 
   // CJK split-char fallback for credit labels: find adjacent "统"+"一"+"社"+"会" single-char
   // words that form "统一社会" when reading left-to-right on the same line.
+  // IMPORTANT: Track source words via _srcWords so they can be excluded from name region.
   if (creditLabels.length === 0) {
     var tongWords = words.filter(function(w) {
       return (w.text === '统' || w.normText === '统') && w.w < w.h * 3;
     });
+    var _usedTongWords = []; // track used "统" words to avoid reuse
     for (var _ti = 0; _ti < tongWords.length; _ti++) {
       var _tw = tongWords[_ti];
+      if (_usedTongWords.indexOf(_tw) >= 0) continue;
       // Find "一" to the right of "统" on the same line
       var yiWords = words.filter(function(w) {
         return (w.text === '一' || w.normText === '一') && w.w < w.h * 3 &&
@@ -1052,17 +1057,28 @@ function _extractNamesByCoords(words, result) {
                  Math.abs(w.y - _yw.y) <= _yw.h * 0.5 && w.x >= _yw.x - _yw.h * 0.5;
         });
         if (sheWords.length > 0) {
-          // Found "统一社" — synthesize virtual credit label
           var _sw = sheWords[0];
+          // Find "会" to the right of "社" to complete "统一社会"
+          var huiWords = words.filter(function(w) {
+            return (w.text === '会' || w.normText === '会') && w.w < w.h * 3 &&
+                   Math.abs(w.y - _sw.y) <= _sw.h * 0.5 && w.x >= _sw.x - _sw.h * 0.5;
+          });
+          var _hw = huiWords.length > 0 ? huiWords[0] : null;
+          var _vcSrcWords = [_tw, _yw, _sw];
+          if (_hw) _vcSrcWords.push(_hw);
+          // Synthesize virtual credit label — use rightmost source word for bounds
+          var _vcRight = _hw || _sw;
           var virtualCreditLabel = {
             text: '统一社会', normText: '统一社会',
-            x: _tw.x, y: _tw.y, w: (_sw.x + _sw.w) - _tw.x, h: _tw.h,
-            cx: (_tw.cx + _sw.cx) / 2, cy: (_tw.cy + _sw.cy) / 2,
-            nx: (_tw.nx + _sw.nx) / 2, ny: (_tw.ny + _sw.ny) / 2,
-            confidence: Math.min(_tw.confidence || 0.9, _yw.confidence || 0.9, _sw.confidence || 0.9)
+            x: _tw.x, y: _tw.y, w: (_vcRight.x + _vcRight.w) - _tw.x, h: _tw.h,
+            cx: (_tw.cx + _vcRight.cx) / 2, cy: (_tw.cy + _vcRight.cy) / 2,
+            nx: (_tw.nx + _vcRight.nx) / 2, ny: (_tw.ny + _vcRight.ny) / 2,
+            confidence: Math.min(_tw.confidence || 0.9, _yw.confidence || 0.9, _sw.confidence || 0.9),
+            _isVirtual: true, _srcWords: _vcSrcWords
           };
           creditLabels.push(virtualCreditLabel);
-          break;
+          _usedTongWords.push(_tw);
+          break; // move to next "统" word
         }
       }
     }
@@ -1088,11 +1104,40 @@ function _extractNamesByCoords(words, result) {
     var isLeftSide = label.nx < 0.5;
 
     var regionWords = [];
+    // Build set of credit label source words to exclude (CJK split-char scenario)
+    // This prevents credit label fragments (统/一/社/会/信/用/代/码/纳/税/人/识/别/号)
+    // from being collected as name region words when CJK chars are split into single words.
+    var _creditSrcWordSet = [];
+    for (var _csi = 0; _csi < creditLabels.length; _csi++) {
+      var _cl = creditLabels[_csi];
+      if (_cl._srcWords) {
+        for (var _csj = 0; _csj < _cl._srcWords.length; _csj++) {
+          _creditSrcWordSet.push(_cl._srcWords[_csj]);
+        }
+      }
+      // Also exclude all single-char words on the same line as any credit label
+      // (covers "信用代码/纳税人识别号" chars not in _srcWords)
+      for (var _cwi = 0; _cwi < words.length; _cwi++) {
+        var _cw = words[_cwi];
+        if (_cw.text.length === 1 && /[\u4e00-\u9fff]/.test(_cw.text)) {
+          // Same side and same vertical band as credit label
+          var _clIsLeft = _cl.nx < 0.5;
+          var _cwIsLeft = _cw.nx < 0.5;
+          if (_clIsLeft === _cwIsLeft && Math.abs(_cw.cy - _cl.cy) <= _cl.h * 1.5) {
+            if (_creditSrcWordSet.indexOf(_cw) < 0) {
+              _creditSrcWordSet.push(_cw);
+            }
+          }
+        }
+      }
+    }
     for (var wi = 0; wi < words.length; wi++) {
       var w = words[wi];
       if (w === label) continue;
       // For virtual (synthesized) labels from CJK split chars, also skip the source words
       if (label._srcWords && label._srcWords.indexOf(w) >= 0) continue;
+      // Skip source words of virtual credit labels (统/一/社/会 etc.)
+      if (_creditSrcWordSet.indexOf(w) >= 0) continue;
 
       // ENFORCE REGION BOUNDARY: only collect words on the SAME SIDE as the label.
       // This is the critical fix — without it, "名称：" on the left half would also
@@ -1108,7 +1153,7 @@ function _extractNamesByCoords(words, result) {
       // Only look above for right-side labels (seller) — buyer labels should only look below
       var includeAbove = !isLeftSide && isAboveLabel && w.x >= label.x - lineH * 2;
       var isInYRange = isBelowOrSameLine || includeAbove;
-      var isNotLabel = !/^名\s*称[:：]/.test(w.text) && !/^名\s*称[:：]/.test(w.normText);
+      var isNotLabel = !/^名\s*称\s*[:：]/.test(w.text) && !/^名\s*称\s*[:：]/.test(w.normText);
       var isNotCreditLabel = !/统一社会(?:信用代码)?|纳税人识别号/.test(w.text) && !/统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
       var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.normText);
       // Filter out metadata/watermark words (download count, verification count, etc.)
@@ -1428,10 +1473,10 @@ function _extractByText(fullText, words) {
   var codes = [];
   var ccPositions = [];
   if (!result.buyerCreditCode || !result.sellerCreditCode) {
-    var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
+    var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
     var cm;
     while ((cm = ccRegex.exec(text)) !== null) {
-      var code = cm[1].toUpperCase();
+      var code = cm[1].replace(/\s+/g, '').toUpperCase();
       // Guard: 18位纯数字也可能是信用代码；非18位纯数字则排除
       var _ccPureDigit2 = /^\d+$/.test(code);
       if (_ccPureDigit2 && code.length !== 18) continue;
@@ -1468,7 +1513,7 @@ function _extractByText(fullText, words) {
   // Priority 3: Generic "名称：" — first = buyer, second = seller
   // Use credit code position as anchor: find "名称" before seller's credit code
   if (!result.buyerName || !result.sellerName) {
-    var nameRegex = /名\s*称[:：]\s*([^\n]+)/g;
+    var nameRegex = /名\s*称\s*[:：]\s*([^\n]+)/g;
     var names = [];
     var namePositions = [];
     var nm;
@@ -2218,9 +2263,9 @@ function _extractSeller(words, imgW, imgH) {
 
   // Pattern 2: "名称:" in seller region (right half) — guaranteed seller
   if (!sellerName) {
-    var nameLabels = _findWords(sellerWords, /^名\s*称[:：]?$/);
+    var nameLabels = _findWords(sellerWords, /^名\s*称\s*[:：]?\s*$/);
     // Also check for inline "名称:公司名" format
-    var inlineNameLabels = _findWords(sellerWords, /^名\s*称[:：]/);
+    var inlineNameLabels = _findWords(sellerWords, /^名\s*称\s*[:：]/);
     // Merge both, preferring inline format
     var allNameLabels = inlineNameLabels.length > 0 ? inlineNameLabels : nameLabels;
     if (allNameLabels.length > 0) {
@@ -2228,7 +2273,7 @@ function _extractSeller(words, imgW, imgH) {
       var rightNameLabel = allNameLabels[allNameLabels.length - 1];
       // Check if this is an inline "名称:公司名" word
       var rightNlText = rightNameLabel.text || rightNameLabel.normText;
-      var rightNlInlineMatch = rightNlText.match(/^名\s*称[:：]\s*(.+)$/);
+      var rightNlInlineMatch = rightNlText.match(/^名\s*称\s*[:：]\s*(.+)$/);
       if (rightNlInlineMatch) {
         var _snInline = _cleanName(rightNlInlineMatch[1]);
         if (_snInline) sellerName = _snInline;
@@ -3004,10 +3049,10 @@ function extractByCoordinates(ocrResult) {
     }
     // Then try text regex
     if (!sellerCreditCode || !buyerCreditCode) {
-      var ccRe = /(?:纳税人识别号|统一社会信用代码)[^A-Z0-9]{0,30}([A-Z0-9]{15,20})/gi;
+      var ccRe = /(?:纳税人识别号|统一社会信用代码)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
       var ccM, allCc = [];
       while ((ccM = ccRe.exec(normText)) !== null) {
-        var cc = ccM[1].toUpperCase();
+        var cc = ccM[1].replace(/\s+/g, '').toUpperCase();
         // Guard: 18位纯数字也可能是信用代码；非18位纯数字则排除
         var _ccPureDigit = /^\d+$/.test(cc);
         if (_ccPureDigit && cc.length !== 18) continue;
