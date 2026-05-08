@@ -507,7 +507,9 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
       invoiceDate: info.invoiceDate || '(空)',
       buyerName: info.buyerName || '(空)',
       sellerName: info.sellerName || '(空)',
-      amountTax: info.amountTax || 0
+      amountTax: info.amountTax || 0,
+      amountNoTax: info.amountNoTax || 0,
+      taxAmount: info.taxAmount || 0
     });
 
     // --- 后置校验：金额求和验证（含税价 ≈ 不含税 + 税额）---
@@ -552,11 +554,21 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
 
     // Amounts — same guard logic as applyOcrResult
     var effAmt = info.amountTax > 0 ? info.amountTax : info.amountNoTax;
+    console.log('[PDF文字提取] 金额写入检查: effAmt=' + effAmt +
+      ', fileObj.amountTax=' + (fileObj.amountTax||0) +
+      ', fileObj.amountNoTax=' + (fileObj.amountNoTax||0) +
+      ', info.amountNoTax=' + (info.amountNoTax||0) +
+      ', info.isNonTax=' + info.isNonTax);
     if (effAmt > 0 && !fileObj.amountTax && !fileObj.amountNoTax) {
       fileObj.amount = effAmt;
       fileObj.amountTax = info.amountTax;
       fileObj.amountNoTax = info.amountNoTax;
       fileObj.taxAmount = info.taxAmount || 0;
+      console.log('[PDF文字提取] 金额已写入: amountTax=' + fileObj.amountTax + ', amountNoTax=' + fileObj.amountNoTax);
+    } else if (info.isNonTax && info.amountNoTax > 0 && fileObj.amountNoTax === 0) {
+      // 非税发票：即使守卫未通过，也强制补写 amountNoTax
+      fileObj.amountNoTax = info.amountNoTax;
+      console.log('[PDF文字提取] 非税强制补写 amountNoTax=' + fileObj.amountNoTax);
     } else if (effAmt > 0 && fileObj.amountTax > 0) {
       if (!fileObj.taxAmount && info.taxAmount > 0) {
         fileObj.taxAmount = info.taxAmount;
@@ -2595,13 +2607,12 @@ function extractByCoordinates(ocrResult) {
     // Extract amounts using text patterns
     var nontaxAmts = _extractAmountsByText(fullText);
     amountTax = nontaxAmts.amountTax;
-    amountNoTax = nontaxAmts.amountNoTax;
-    taxAmount = nontaxAmts.taxAmount;
-
-    // Non-tax invoices have no tax — amountNoTax = amountTax
-    if (amountTax > 0 && amountNoTax === 0) {
-      amountNoTax = amountTax;
-      taxAmount = 0;
+    // 非税发票无税额，不含税价必须等于含税价
+    // 注意：不能信任 nontaxAmts.amountNoTax（可能被中文大写金额误解析，如"叁佰贰拾"→320）
+    amountNoTax = amountTax;
+    taxAmount = 0;
+    if (amountTax > 0) {
+      console.log('[非税金额] amountNoTax 已强制设为与 amountTax 相同:', amountNoTax);
     }
 
     // Credit code belongs to buyer (交款人), not seller
