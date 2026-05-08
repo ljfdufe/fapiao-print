@@ -170,6 +170,11 @@
         <div class="row" style="margin-top:8px"><label class="lbl">识别精度</label><div class="ctrl"><select id="ocrPrecision" onchange="setOcrPrecision(this.value)"><option value="fast">快速（1280px）</option><option value="standard" selected>标准（1920px）</option><option value="precise">精确（2800px）</option></select></div></div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">开启后添加发票时自动 OCR 识别金额、销售方等信息；关闭后可手动点击识别按钮触发。快速模式速度最快但小字可能模糊；标准模式兼顾速度与准确度；精确模式最准但速度较慢。</div>
       </div>
+      <div class="sec" id="pdfTextSection">
+        <div class="sec-title">📝 PDF 文字提取</div>
+        <div class="trow"><label class="tlbl">自动提取</label><button class="tgl" id="togglePdfText" onclick="togglePref('pdfTextEnabled',this)"></button></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">开启后从 PDF 文字层提取发票字段（销售方、金额等），无需 OCR。对扫描件/图片 PDF 无效。默认关闭以提高加载速度；需要结构化字段时再开启。</div>
+      </div>
       <div class="sec">
         <div class="sec-title">✅ 发票查验</div>
         <div style="display:flex;gap:6px">
@@ -278,7 +283,7 @@
 </div>
 
 <!-- Invoice options modal -->
-<div class="modal-bg hidden" id="invModal"><div class="modal"><div class="modal-title">📝 发票选项</div><div class="modal-body" id="invModalBody"></div><div class="modal-actions"><button class="btn" onclick="closeInvModal()">取消</button><button class="btn btn-primary" onclick="confirmInvModal()">确认</button></div></div></div>
+<div class="modal-bg hidden" id="invModal" onclick="closeInvModal()"><div class="modal" onclick="event.stopPropagation()"><div class="modal-title">📝 发票选项</div><div class="modal-body" id="invModalBody"></div><div class="modal-actions"><button class="btn" onclick="closeInvModal()">取消</button><button class="btn btn-primary" onclick="confirmInvModal()">确认</button></div></div></div>
 
 <!-- Scripts — loaded in order: OCR → Layout → Print → App -->
 <script src="ocr.js"></script>

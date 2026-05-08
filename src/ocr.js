@@ -2452,10 +2452,11 @@ function extractByCoordinates(ocrResult) {
   }
   normText = normText.replace(/([\u4e00-\u9fff])\n([\u4e00-\u9fff])/g, '$1$2');
   normText = _normText(normText);
-  // Collapse digit spaces
+  // Collapse digit spaces — ONLY for thousand separators (e.g., "1 000" → "1000")
+  // Must NOT merge separate numbers like "1" + "50" + "50.00" → "15050.00"
   for (var _ni = 0; _ni < 3; _ni++) {
     var _prev = '';
-    while (_prev !== normText) { _prev = normText; normText = normText.replace(/(\d)\s+(\d)/g, '$1$2'); }
+    while (_prev !== normText) { _prev = normText; normText = normText.replace(/(\d)\s+(\d{3}\b)/g, '$1$2'); }
   }
   normText = normText.replace(/(\d)\s+\./g, '$1.');
   normText = normText.replace(/¥\s+(\d)/g, '¥$1');
@@ -2900,9 +2901,14 @@ function extractByCoordinates(ocrResult) {
 
   // --- Cross-derivation with tax rate validation ---
   var VALID_TAX_RATES_COORD = [0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13];
-  if (amountTax > 0 && amountNoTax > 0 && !_taxAmountResolved) {
+  if (amountTax > 0 && amountNoTax > 0 && amountNoTax < amountTax && !_taxAmountResolved) {
     taxAmount = Math.round((amountTax - amountNoTax) * 100) / 100;
     if (taxAmount > 0) _taxAmountResolved = true;
+  }
+  // 0%税率：不含税价≈含税价，税额必须为0
+  if (amountTax > 0 && amountNoTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && !_taxAmountResolved) {
+    taxAmount = 0;
+    _taxAmountResolved = true;
   }
   if (amountTax > 0 && _taxAmountResolved && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
     var derivedNoTax = Math.round((amountTax - taxAmount) * 100) / 100;
@@ -3015,9 +3021,15 @@ function extractByCoordinates(ocrResult) {
   }
 
   // --- Cross-derivation after fallback ---
-  if (amountTax > 0 && amountNoTax > 0 && !_taxAmountResolved) {
+  // 必须保证不含税价 < 含税价，否则推导结果为负，无意义
+  if (amountTax > 0 && amountNoTax > 0 && amountNoTax < amountTax && !_taxAmountResolved) {
     taxAmount = Math.round((amountTax - amountNoTax) * 100) / 100;
     if (taxAmount > 0) _taxAmountResolved = true;
+  }
+  // 0%税率：不含税价≈含税价，税额必须清0
+  if (amountTax > 0 && amountNoTax > 0 && Math.abs(amountNoTax - amountTax) < 0.01 && !_taxAmountResolved) {
+    taxAmount = 0;
+    _taxAmountResolved = true;
   }
   if (amountTax > 0 && _taxAmountResolved && taxAmount > 0 && !amountNoTax && taxAmount < amountTax) {
     var derivedNoTax2 = Math.round((amountTax - taxAmount) * 100) / 100;
@@ -3033,6 +3045,11 @@ function extractByCoordinates(ocrResult) {
   }
 
   // --- Invariants ---
+  // 税额不可能为负数，任何推导异常导致负数时强制清0
+  if (taxAmount < 0) {
+    console.log('[不变量] taxAmount(' + taxAmount + ')为负数，已清除（推导异常）');
+    taxAmount = 0; _taxAmountResolved = false;
+  }
   // 交换前提：amountTax必须不是由文本提取确定的(文本提取的amountTax更可靠)
   // 且坐标amountNoTax超过amountTax时，更可能是坐标提取错误，不应交换
   if (amountTax > 0 && amountNoTax > 0 && amountTax < amountNoTax && !_amountTaxFromText) {

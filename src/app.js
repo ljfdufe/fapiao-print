@@ -36,7 +36,8 @@ var S = {
     watermark: false, collate: true, duplex: false, pageNum: false,
     printDate: false, confirmPrint: true,
     autoOpenPdf: true,
-    ocrEnabled: false
+    ocrEnabled: false,
+    pdfTextEnabled: false  // PDF文字层提取（默认关闭以提高加载速度）
   }
 };
 
@@ -819,26 +820,28 @@ function loadFileFromDataUrlFast(fd) {
               results.push(fileObj);
             }
             resolve(results.length === 1 ? results[0] : results);
-            // PDF text layer extraction (~5ms, no OCR needed, lightweight builds too)
-            results.forEach(function(r) {
-              invoke('extract_pdf_text', {
-                pdfPath: r._pdfPath,
-                pageIdx: r._pdfPageIdx
-              }).then(function(pdfText) {
-                if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                  applyPdfTextResult(r, pdfText);
-                  updateFileItem(r);
-                  updateAmountSummary();
-                } else if (hasOcr && !S.feat.ocrEnabled) {
-                  console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
-                  applyOcrAsync(r, r.previewUrl);
-                }
-              }).catch(function(err) {
-                console.warn('[PDF文字提取] 失败，将回退OCR:', err);
-                if (hasOcr && !S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+            // PDF 文字层提取（默认关闭以提高加载速度）
+            if (S.feat.pdfTextEnabled) {
+              results.forEach(function(r) {
+                invoke('extract_pdf_text', {
+                  pdfPath: r._pdfPath,
+                  pageIdx: r._pdfPageIdx
+                }).then(function(pdfText) {
+                  if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+                    applyPdfTextResult(r, pdfText);
+                    updateFileItem(r);
+                    updateAmountSummary();
+                  } else if (hasOcr && S.feat.ocrEnabled) {
+                    console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
+                    applyOcrAsync(r, r.previewUrl);
+                  }
+                }).catch(function(err) {
+                  console.warn('[PDF文字提取] 失败，将回退OCR:', err);
+                  if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                });
               });
-            });
-            // Queue OCR for each page in background — fallback for scanned PDFs
+            }
+            // OCR 队列（独立于 PDF 文字提取，由 ocrEnabled 控制）
             results.forEach(function(r) {
               if (S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
             });
@@ -1661,6 +1664,9 @@ function togglePref(k, btn) {
   if (k === 'ocrEnabled') {
     try { localStorage.setItem('fapiao-ocr-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
   }
+  if (k === 'pdfTextEnabled') {
+    try { localStorage.setItem('fapiao-pdf-text-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
+  }
 }
 
 function setOcrPrecision(val) {
@@ -1717,7 +1723,7 @@ function exportSettings() {
 function resetSettings() {
   if (!confirm('确认恢复所有默认设置？')) return;
   S.layout = { cols: 1, rows: 1 };
-  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false };
+  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: false };
   S.ocrPrecision = 'standard';
   S.viewZoom = 0;
   document.getElementById('paperSize').value = 'A4';
@@ -1751,6 +1757,7 @@ function resetSettings() {
   document.getElementById('toggleConfirm').classList.add('on');
   document.getElementById('toggleAutoOpenPdf').classList.add('on');
   document.getElementById('toggleOcrEnabled').classList.remove('on');
+  document.getElementById('togglePdfText').classList.remove('on');
   document.getElementById('ocrPrecision').value = 'standard';
   document.getElementById('printMode').value = 'dialog';
   document.getElementById('themeMode').value = 'light';
@@ -1760,6 +1767,7 @@ function resetSettings() {
   try { localStorage.removeItem('fapiao-amt-mode'); } catch(e) {}
   try { localStorage.removeItem('fapiao-ocr-enabled'); } catch(e) {}
   try { localStorage.removeItem('fapiao-ocr-precision'); } catch(e) {}
+  try { localStorage.removeItem('fapiao-pdf-text-enabled'); } catch(e) {}
   document.getElementById('saveDir').value = '';
   document.getElementById('amtMode').value = 'tax';
   S.amtMode = 'tax';
@@ -1925,6 +1933,18 @@ document.getElementById('orientation').value = 'landscape';
     if (v === '1') {
       S.feat.ocrEnabled = true;
       document.getElementById('toggleOcrEnabled').classList.add('on');
+    }
+  } catch(e) {}
+})();
+
+// Restore PDF text extraction setting
+(function() {
+  try {
+    var v = localStorage.getItem('fapiao-pdf-text-enabled');
+    if (v === '1') {
+      S.feat.pdfTextEnabled = true;
+      var btn = document.getElementById('togglePdfText');
+      if (btn) btn.classList.add('on');
     }
   } catch(e) {}
 })();
