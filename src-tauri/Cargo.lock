@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "fapiao-print"
-version = "1.9.5"
+version = "1.9.6"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
