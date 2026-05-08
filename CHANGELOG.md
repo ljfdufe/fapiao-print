@@ -1,5 +1,31 @@
 # 📋 更新日志
 
+## v1.9.6 — dzcp/iloveofd 格式兼容修复 + 非税发票金额修复
+
+### 🚀 新功能
+
+- **PDF 文字提取可配置**：新增 `enable_pdf_text_extraction` 配置项（默认开启），关闭后可强制走 OCR 路径，用于对比测试或规避特定 PDF 文字层异常
+
+### 🐛 修复
+
+- **dzcp 格式 PDF 名称/信用代码提取失败**：CJK 拆字导致"名称:"/"统一社会信用代码:"标签被拆成单字，`_extractNamesByCoords` 和信用代码坐标提取无法匹配。新增虚拟标签合成逻辑（"名"+"称"配对、"统"+"一"+"社"配对），合成完整标签后正常提取
+- **dzcp 格式发票类型检测返回 unknown**：同上，类型检测依赖"价税合计"等关键词，拆字后无法匹配。新增空间位置回退检测（`_detectInvoiceTypeFallback`），直接扫描所有文本块内容
+- **dzcp 格式金额提取失败（数字跨行折叠）**："3.15" 和 "30" 被拆到两行导致拼接错误。新增数字换行折叠合并逻辑，`_extractAmountsByCoordinates` 中先合并再解析
+- **dzcp 格式金额提取失败（中文大写金额换行折叠）**："（小写）" 和 "¥70000.00" 之间有 "柒万圆整" 等中文大写字符，Pattern1 的 `\s*` 无法跨越。新增 Pattern1c，允许中文大写字符（壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正）
+- **dzcp 格式 ¥ 符号提取为 ·（中点）**：部分 PDF 文字提取将 ¥ 符号提取为 `·`（U+00B7），导致 Pattern1/2 无法匹配。修复：所有金额正则统一使用 `[¥·•]` 字符类
+- **dzcp 格式金额提取（小数点后空格）**："94. 00" 因 kern 断词导致小数点与小数部分分离。新增小数点后空格折叠处理
+- **dzcp 格式购方信用代码提取失败**：标签与值之间因拆字产生换行，`_extractCreditCodesByCoords` 正则改为 `[\s\S]*?` 跨行匹配
+- **非税发票金额异常（中文大写金额误解析）**：`parseChineseNumeral` 将非税票据的"柒万圆整"等解析为超大金额。修复：`_isNonTax=true` 时 `amountNoTax` 强制等于 `amountTax`，忽略中文大写金额解析结果
+- **0% 税率发票税额错误**：税额为 0 时 OCR/文字提取可能返回异常值。多处加守卫：`extractByCoordinates` 中税额为 0 时跳过坐标提取、`_extractAmountsByText` 中 `amountTax - amountNoTax != taxAmount` 时重置 `taxAmount = 0`、`_applyOcrTextResult` 中 `taxAmount > amountTax` 时重置
+- **话费发票金额异常**："价税合计（大写）柒万圆整（小写）¥70000.00" 格式导致金额提取取到极大值。修复：`_extractAmountsByText` 中 Pattern1c 允许中文大写字符、`_chineseNumeralToNumber` 兜底返回 0 而非 NaN
+
+### 🔧 优化
+
+- **虚拟标签合成**：遍历所有文本块，将相邻的单字文本块（"名"+"称"、"统"+"一"+"社"+"会"+"信"+"用"+"代"+"码"）合成为虚拟标签，用于名称/信用代码/发票类型检测
+- **`merge_adjacent_words` 增强**：处理 kern 断词导致的数字碎片（如 "94. " + "00"）
+
+---
+
 ## v1.9.5 — GBK/Big5 编码支持 + 火车票识别修复
 
 ### 🐛 修复
