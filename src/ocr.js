@@ -3,6 +3,10 @@
 // =====================================================
 // Dependencies (global): invoke, isTauri, dataUrlToUint8Array
 
+// Credit code label pattern — allows \s* between CJK chars for dzcp split-char PDFs
+// where each character is on its own line: "统\n一\n社\n会\n信\n用\n代\n码"
+var _CC_LABEL_PAT = '(?:统\\s*一\\s*社\\s*会\\s*信\\s*用\\s*代\\s*码|纳\\s*税\\s*人\\s*识\\s*别\\s*号)';
+
 /**
  * Parse amount string to number (2 decimal places)
  */
@@ -847,7 +851,8 @@ function _extractNamesCrossLine(text, result) {
   if (nameEntries.length === 0) return;
 
   // Find credit code positions to anchor buyer/seller determination
-  var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
+  // Allow \s* between CJK chars in labels for extreme dzcp split-char (each char on own line)
+  var ccRegex = new RegExp(_CC_LABEL_PAT + '[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)', 'gi');
   var codes = [];
   var cm;
   while ((cm = ccRegex.exec(text)) !== null) {
@@ -1497,7 +1502,7 @@ function _extractByText(fullText, words) {
   var codes = [];
   var ccPositions = [];
   if (!result.buyerCreditCode || !result.sellerCreditCode) {
-    var ccRegex = /(?:统一社会信用代码|纳税人识别号)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
+    var ccRegex = new RegExp(_CC_LABEL_PAT + '[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)', 'gi');
     var cm;
     while ((cm = ccRegex.exec(text)) !== null) {
       var code = cm[1].replace(/\s+/g, '').toUpperCase();
@@ -2221,7 +2226,7 @@ function _extractSeller(words, imgW, imgH) {
 
   // --- Credit code in seller region ---
   // Pattern 1: "纳税人识别号:" or "统一社会信用代码:" followed by code
-  var ccRe = /(?:纳税人识别号|统一社会信用代码)[\/:：\s]*([A-Z0-9]{15,20})/gi;
+  var ccRe = new RegExp(_CC_LABEL_PAT + '[\\/:：\\s]*([A-Z0-9]{15,20})', 'gi');
   var ccM;
   while ((ccM = ccRe.exec(sellerText)) !== null) {
     sellerCreditCode = ccM[1].toUpperCase();
@@ -3074,7 +3079,7 @@ function extractByCoordinates(ocrResult) {
     }
     // Then try text regex
     if (!sellerCreditCode || !buyerCreditCode) {
-      var ccRe = /(?:纳税人识别号|统一社会信用代码)[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)/gi;
+      var ccRe = new RegExp(_CC_LABEL_PAT + '[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)', 'gi');
       var ccM, allCc = [];
       while ((ccM = ccRe.exec(normText)) !== null) {
         var cc = ccM[1].replace(/\s+/g, '').toUpperCase();
