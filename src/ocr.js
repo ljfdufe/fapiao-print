@@ -675,8 +675,14 @@ function _normTextForExtract(text) {
     while (_prev !== text) { _prev = text; text = text.replace(/(\d)[ \t]+(\d)/g, '$1$2'); }
   }
   text = text.replace(/(\d)[ \t]+\./g, '$1.');
+  // Collapse space after decimal point before digits: "399. 00" → "399.00"
+  // Common in dzcp-format PDFs where each char is a separate word
+  text = text.replace(/\.([ \t]+)(\d)/g, '.$2');
   text = text.replace(/¥[ \t]+(\d)/g, '¥$1');
   text = text.replace(/([\u4e00-\u9fff])\s+¥/g, '$1¥');
+  // Collapse ¥+newline+digits: "¥\n399.00" → "¥399.00"
+  // Common in PDF text layer where ¥ and amount are in separate BT/ET blocks
+  text = text.replace(/¥\n(\d)/g, '¥$1');
 
   // Normalize OCR ¥↔1 misread artifacts (critical for amount accuracy)
   // Step 1: ¥¥ patterns — OCR misreads "1" as "¥" producing "¥¥72.68" → "¥172.68"
@@ -1639,7 +1645,7 @@ function _extractAmountsByText(fullText) {
   // Enhanced: handle spaces between "小写）" and "¥" (PDF text often has "（小写） ¥ 4500.00")
   // Also handle · (middle dot U+00B7) / • (bullet U+2022) replacing ¥ — some PDFs render
   // "(小写)·162.98" where · is a corrupted ¥ symbol or PDF text extraction artifact.
-  var xxMatch = text.match(/小\s*写[）\)]*[：:]*\s*[¥·•]?\s*(\d[\d,]*\.\d{2})/);
+  var xxMatch = text.match(/小\s*写\s*[）\)]*[：:]*\s*[¥·•]?\s*(\d[\d,]*\.\d{2})/);
   if (xxMatch) {
     var v1 = parseAmt(xxMatch[1]);
     if (v1 > 10 && !isLikelyYearOrDate(v1, xxMatch[1])) {
@@ -1651,7 +1657,7 @@ function _extractAmountsByText(fullText) {
   // e.g., "小写）¥4500.00" with possible space between ¥ and digits
   // Also handles "小写）·162.98" where · replaces ¥
   if (!result.amountTax) {
-    var xxBare = text.match(/小\s*写[）\)]*[：:]*[\s·•]*\s*(\d[\d,]*\.\d{2})/);
+    var xxBare = text.match(/小\s*写\s*[）\)]*[：:]*[\s·•]*\s*(\d[\d,]*\.\d{2})/);
     if (xxBare) {
       var v1b = parseAmt(xxBare[1]);
       if (v1b > 10 && !isLikelyYearOrDate(v1b, xxBare[1])) {
@@ -1667,7 +1673,7 @@ function _extractAmountsByText(fullText) {
   // IMPORTANT: ¥/·/• is REQUIRED (not optional) to avoid matching wrong amounts
   // when other numbers appear between （小写） and the target amount.
   if (!result.amountTax) {
-    var xxChinese = text.match(/小\s*写[）\)]*[：:]*[\s零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]*[¥·•]\s*(\d[\d,]*\.\d{2})/);
+    var xxChinese = text.match(/小\s*写\s*[）\)]*[：:]*[\s零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]*[¥·•]\s*(\d[\d,]*\.\d{2})/);
     if (xxChinese) {
       var v1c = parseAmt(xxChinese[1]);
       if (v1c > 10 && !isLikelyYearOrDate(v1c, xxChinese[1])) {
