@@ -678,11 +678,29 @@ function _normTextForExtract(text) {
   // Collapse space after decimal point before digits: "399. 00" → "399.00"
   // Common in dzcp-format PDFs where each char is a separate word
   text = text.replace(/\.([ \t]+)(\d)/g, '.$2');
+  // Collapse newlines between digits/decimal/¥ — extreme dzcp split-char scenario
+  // where each digit is on its own line: "8\n7\n3\n.\n7\n9" → "873.79"
+  // Must loop because each replace only collapses one newline at a time.
+  for (var _dnl = 0; _dnl < 20; _dnl++) {
+    var _dnlPrev = text;
+    text = text.replace(/(\d)\n(\d)/g, '$1$2');     // digit\n digit → merged
+    text = text.replace(/(\d)\n\./g, '$1.');          // digit\n. → digit.
+    text = text.replace(/\.\n(\d)/g, '.$1');          // .\ndigit → .digit
+    text = text.replace(/¥\n(\d)/g, '¥$1');           // ¥\ndigit → ¥digit
+    text = text.replace(/¥\n·/g, '¥');               // ¥\n· → ¥ (middle dot replacing ¥)
+    if (text === _dnlPrev) break; // no more changes
+  }
+  // Collapse newlines between Chinese numeral characters (extreme dzcp split-char):
+  // "玖\n佰\n圆\n整" → "玖佰圆整". Only targets the specific character set used in
+  // Chinese financial numerals — safe to merge aggressively since these chars rarely
+  // appear adjacently in normal text with intentional line breaks between them.
+  for (var _cnl = 0; _cnl < 10; _cnl++) {
+    var _cnlPrev = text;
+    text = text.replace(/([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十])\n([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十])/g, '$1$2');
+    if (text === _cnlPrev) break;
+  }
   text = text.replace(/¥[ \t]+(\d)/g, '¥$1');
   text = text.replace(/([\u4e00-\u9fff])\s+¥/g, '$1¥');
-  // Collapse ¥+newline+digits: "¥\n399.00" → "¥399.00"
-  // Common in PDF text layer where ¥ and amount are in separate BT/ET blocks
-  text = text.replace(/¥\n(\d)/g, '¥$1');
 
   // Normalize OCR ¥↔1 misread artifacts (critical for amount accuracy)
   // Step 1: ¥¥ patterns — OCR misreads "1" as "¥" producing "¥¥72.68" → "¥172.68"
@@ -1740,7 +1758,8 @@ function _extractAmountsByText(fullText) {
     // Look for Chinese numeral characters after "价税合计（大写）" or standalone after "大写"
     var daxiePatterns = [
       // "价税合计（大写）捌仟捌佰壹拾玖圆陆角整" or "金额合计（大写）壹仟叁佰贰拾元整"
-      /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
+      // Allow \s* between 合计 and （ for extreme dzcp split-char (each char on own line)
+      /(?:价\s*税\s*合\s*计|金\s*额\s*合\s*计)\s*[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
       // "（大写）捌仟捌佰壹拾玖圆陆角整" (after 价税合计 on a different line)
       /[（(]\s*大\s*写\s*[）)][：:]*\s*([零壹贰叁肆伍陆柒捌玖拾佰仟万亿萬億圆元角分整正一二三四五六七八九十]+)/,
       // "大写：捌仟捌佰壹拾玖圆陆角整"
