@@ -1445,6 +1445,50 @@ function _extractByText(fullText, words) {
     var ccLabelWords = words.filter(function(w) {
       return /统一社会(?:信用代码)?/.test(w.text) || /统一社会(?:信用代码)?/.test(w.normText);
     });
+    // Fallback: synthesize virtual "统一社会" labels from single CJK chars (dzcp/iloveofd format)
+    // Handles PDFs where ALL chars are split into single-char words — no word contains "统一社会"
+    if (ccLabelWords.length === 0) {
+      var _tongWords = words.filter(function(w) {
+        return (w.text === '统' || w.normText === '统') && w.w < w.h * 3;
+      });
+      var _usedTong = [];
+      for (var _ti = 0; _ti < _tongWords.length; _ti++) {
+        var _tw = _tongWords[_ti];
+        if (_usedTong.indexOf(_tw) >= 0) continue;
+        var _yiWords = words.filter(function(w) {
+          return (w.text === '一' || w.normText === '一') && w.w < w.h * 3 &&
+                 Math.abs(w.y - _tw.y) <= _tw.h * 0.5 && w.x >= _tw.x - _tw.h * 0.5;
+        });
+        for (var _yi = 0; _yi < _yiWords.length; _yi++) {
+          var _yw = _yiWords[_yi];
+          var _sheWords = words.filter(function(w) {
+            return (w.text === '社' || w.normText === '社') && w.w < w.h * 3 &&
+                   Math.abs(w.y - _yw.y) <= _yw.h * 0.5 && w.x >= _yw.x - _yw.h * 0.5;
+          });
+          if (_sheWords.length > 0) {
+            var _sw = _sheWords[0];
+            var _huiWords = words.filter(function(w) {
+              return (w.text === '会' || w.normText === '会') && w.w < w.h * 3 &&
+                     Math.abs(w.y - _sw.y) <= _sw.h * 0.5 && w.x >= _sw.x - _sw.h * 0.5;
+            });
+            var _hw = _huiWords.length > 0 ? _huiWords[0] : null;
+            var _vcRight = _hw || _sw;
+            var virtualCreditLabel = {
+              text: '统一社会', normText: '统一社会',
+              x: _tw.x, y: _tw.y,
+              w: (_vcRight.x + _vcRight.w) - _tw.x, h: _tw.h,
+              cx: (_tw.cx + _vcRight.cx) / 2, cy: (_tw.cy + _vcRight.cy) / 2,
+              nx: (_tw.nx + _vcRight.nx) / 2, ny: (_tw.ny + _vcRight.ny) / 2,
+              confidence: Math.min(_tw.confidence || 0.9, _yw.confidence || 0.9, _sw.confidence || 0.9),
+              _isVirtual: true
+            };
+            ccLabelWords.push(virtualCreditLabel);
+            _usedTong.push(_tw);
+            break;
+          }
+        }
+      }
+    }
     var _tracedCodes = [];
     for (var _tci = 0; _tci < ccLabelWords.length; _tci++) {
       var _tcLabel = ccLabelWords[_tci];
