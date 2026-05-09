@@ -118,6 +118,8 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 .sidebar-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .sidebar-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .sidebar-panel.hidden { display: none; }
+.sidebar-panel-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
+.sidebar-panel-footer { flex-shrink: 0; }
 
 /* ===== Upload ===== */
 .upload-zone {
