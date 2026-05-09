@@ -303,12 +303,31 @@ function fallbackPrint(files, s) {
   if (!w) { alert('弹出窗口被阻止'); return; }
   var pages = buildPages(files, s);
   var expanded = s.collate ? Array(s.copies).fill(pages).flat() : pages.flatMap(function(p) { return Array(s.copies).fill(p); });
-  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>发票打印</title><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:' + s.paperW + 'mm ' + s.paperH + 'mm;margin:0}body{background:white}.page{width:' + s.paperW + 'mm;height:' + s.paperH + 'mm;position:relative;page-break-after:always;background:white;overflow:hidden}.slot{position:absolute;overflow:hidden;display:flex;align-items:center;justify-content:center}.slot img{max-width:100%;max-height:100%;object-fit:contain}</style></head><body>';
+  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>发票打印</title><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:' + s.paperW + 'mm ' + s.paperH + 'mm;margin:0}body{background:white}.page{width:' + s.paperW + 'mm;height:' + s.paperH + 'mm;position:relative;page-break-after:always;background:white;overflow:hidden}.slot{position:absolute;overflow:hidden;display:flex;align-items:center;justify-content:center}.slot img{max-width:100%;max-height:100%;object-fit:contain}';
+  // Add cut line styles if enabled
+  if (s.cutline) {
+    html += '.cutline-v{position:absolute;top:0;bottom:0;width:0;border-right:1px dashed #ccc}.cutline-h{position:absolute;left:0;right:0;height:0;border-bottom:1px dashed #ccc}';
+  }
+  html += '</style></head><body>';
   expanded.forEach(function(page, pi) {
     html += '<div class="page">';
     var mt = s.marginTop, mb = s.marginBottom, ml = s.marginLeft, mr = s.marginRight;
+    var fm = s.footerMargin || 0;
     var slotW = (s.paperW - s.cols * (ml + mr) - (s.cols - 1) * s.gapH) / s.cols;
-    var slotH = (s.paperH - s.rows * (mt + mb) - (s.rows - 1) * s.gapV) / s.rows;
+    var slotH = (s.paperH - s.rows * (mt + mb) - (s.rows - 1) * s.gapV - fm) / s.rows;
+    // Draw cut lines (vertical + horizontal) between slots
+    if (s.cutline && (s.cols > 1 || s.rows > 1)) {
+      var hasFb = s.pageNum || s.printDate || (s.footerText || '').trim();
+      var vLineH = hasFb ? (s.paperH - fm) : s.paperH;
+      for (var c = 1; c < s.cols; c++) {
+        var x = ml + c * (slotW + ml + mr + s.gapH) - s.gapH / 2;
+        html += '<div class="cutline-v" style="left:' + x + 'mm;height:' + vLineH + 'mm"></div>';
+      }
+      for (var r = 1; r < s.rows; r++) {
+        var y = mt + r * (slotH + mt + mb + s.gapV) - s.gapV / 2;
+        html += '<div class="cutline-h" style="top:' + y + 'mm"></div>';
+      }
+    }
     for (var r = 0; r < s.rows; r++) for (var c = 0; c < s.cols; c++) {
       var f = page[r * s.cols + c];
       var x = ml + c * (slotW + ml + mr + s.gapH), y = mt + r * (slotH + mt + mb + s.gapV);
@@ -341,13 +360,24 @@ function fallbackPrint(files, s) {
         html += '<div class="slot" style="left:' + x + 'mm;top:' + y + 'mm;width:' + slotW + 'mm;height:' + slotH + 'mm"><img src="' + escHtml(src) + '" style="' + sizeStyle + transformStyle + '"></div>';
       }
     }
+    // 文本位置：距页面底部 5mm 处（在页边距区域内）
+    var textBottomMm = 5;
+    var lineHeightMm = 7; // 行高 ~7mm，用于多行文本垂直偏移
+
     // Page number and print date (per-page, same as preview)
-    if (s.pageNum) html += '<div style="position:absolute;bottom:5mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">第 ' + (pi + 1) + ' 页 / 共 ' + expanded.length + ' 页</div>';
+    if (s.pageNum) html += '<div style="position:absolute;bottom:' + textBottomMm + 'mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">第 ' + (pi + 1) + ' 页 / 共 ' + expanded.length + ' 页</div>';
     if (s.printDate) {
       var now = new Date();
       var dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-      var dateStyle = s.pageNum ? 'position:absolute;bottom:5mm;right:10mm;font-size:10px;color:#94a3b8' : 'position:absolute;bottom:5mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8';
+      var dateBottomMm = textBottomMm;
+      var dateStyle = s.pageNum ? 'position:absolute;bottom:' + dateBottomMm + 'mm;right:10mm;font-size:10px;color:#94a3b8' : 'position:absolute;bottom:' + dateBottomMm + 'mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8';
       html += '<div style="' + dateStyle + '">打印日期 ' + dateStr + '</div>';
+    }
+    // Footer text (per-page, custom text)
+    if (s.footerText) {
+      var footerBottomMm = textBottomMm;
+      if (s.pageNum || s.printDate) footerBottomMm += lineHeightMm;
+      html += '<div style="position:absolute;bottom:' + footerBottomMm + 'mm;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">' + escHtml(s.footerText) + '</div>';
     }
     html += '</div>';
   });

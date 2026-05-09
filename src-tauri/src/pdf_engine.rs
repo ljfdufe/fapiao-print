@@ -2939,6 +2939,9 @@ pub struct RenderSettings {
     pub border_width: Option<f32>,
     pub border_color: Option<String>,
     pub trim_white: Option<bool>,
+    pub footer_text: Option<String>,
+    pub footer_margin: f32,
+    pub custom_fm: bool,
 }
 
 /// A file image with its metadata — sent from JS.
@@ -3035,8 +3038,24 @@ fn calculate_layout_mm(settings: &RenderSettings) -> (Vec<LayoutSlotMm>, f32, f3
     let cols = settings.cols as f32;
     let rows = settings.rows as f32;
 
+    // The fm area is reserved purely for footer text below all rows.
+    // Only deduct footer margin from slot height when there is footer content.
+    // In custom_fm mode: deduct the explicit footer_margin value.
+    // In auto mode: deduct the auto-computed footer height (auto_fm_mm).
+    // When there is no footer content: no deduction (no footer to collide with).
+    let has_footer = settings.page_num || settings.print_date || settings.footer_text.as_ref().map_or(false, |t| !t.is_empty());
+    let line_count = (if settings.page_num || settings.print_date { 1 } else { 0 })
+        + (if settings.footer_text.as_ref().map_or(false, |t| !t.is_empty()) { 1 } else { 0 });
+    let auto_fm_mm = 3.0 + line_count as f32 * 5.0;
+    let effective_fm = if has_footer {
+        if settings.custom_fm { settings.footer_margin } else { auto_fm_mm }
+    } else {
+        0.0
+    };
     let sw = (pw - cols * (ml + mr) - (cols - 1.0) * gh) / cols;
-    let sh = (ph - rows * (mt + mb) - (rows - 1.0) * gv) / rows;
+    let sh = (ph - rows * (mt + mb) - (rows - 1.0) * gv - effective_fm) / rows;
+
+    log::info!("calculate_layout_mm [v2-fm-independent]: pw={pw} ph={ph} mt={mt} mb={mb} effective_fm={effective_fm} ml={ml} mr={mr} gh={gh} gv={gv} rows={rows} cols={cols} sw={sw} sh={sh}");
 
     let mut slots = Vec::new();
     for r in 0..settings.rows as usize {
@@ -3044,7 +3063,8 @@ fn calculate_layout_mm(settings: &RenderSettings) -> (Vec<LayoutSlotMm>, f32, f3
             // Convert row from JS (top-down) to printpdf (bottom-up)
             let row_from_bottom = settings.rows as usize - 1 - r;
             let x_mm = ml + c as f32 * (sw + ml + mr + gh);
-            let y_mm = mb + row_from_bottom as f32 * (sh + mt + mb + gv);
+            // Bottom-up: effective_fm (footer) + mb (row bottom margin) + row offset
+            let y_mm = (effective_fm + mb) + row_from_bottom as f32 * (sh + mt + mb + gv);
             slots.push(LayoutSlotMm { x_mm, y_mm, w_mm: sw, h_mm: sh });
         }
     }
@@ -3097,10 +3117,11 @@ fn render_text_overlay(
     font: &Option<ab_glyph::FontArc>,
     page_num_text: &str,
     print_date_text: &str,
+    footer_text: &str,
     page_width_mm: f32,
     _total_pages: usize,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    if page_num_text.is_empty() && print_date_text.is_empty() {
+    if page_num_text.is_empty() && print_date_text.is_empty() && footer_text.is_empty() {
         return None;
     }
 
@@ -3117,8 +3138,12 @@ fn render_text_overlay(
     let img_width = (page_width_mm * px_per_mm) as u32;
     let font_size = (3.5 * px_per_mm) as f32; // ~3.5mm text height ≈ 10pt at screen
     let line_height = font_size * 1.4;
-    let num_lines = if !page_num_text.is_empty() && !print_date_text.is_empty() { 2 } else { 1 };
-    let img_height = (line_height * num_lines as f32 * 1.5) as u32;
+    // Line layout: pageNum+printDate on one line, footerText on separate line
+    let has_line1 = !page_num_text.is_empty() || !print_date_text.is_empty();
+    let has_line2 = !footer_text.is_empty();
+    let num_lines = (if has_line1 { 1 } else { 0 }) + (if has_line2 { 1 } else { 0 });
+    // img_height: num_lines of text + small top/bottom padding (1.1x ≈ 5% top + 5% bottom)
+    let img_height = (line_height * num_lines as f32 * 1.1) as u32;
 
     // Create RGBA image (transparent background)
     let mut img = image::RgbaImage::new(img_width, img_height);
@@ -3130,13 +3155,13 @@ fn render_text_overlay(
 
     let mut y_offset = font_size; // Start at baseline of first line
 
-    // Helper: render a line of text centered horizontally
-    let render_line = |img: &mut image::RgbaImage, text: &str, y_baseline: f32, sf: &ab_glyph::PxScaleFont<&ab_glyph::FontArc>| {
-        let text_width: f32 = text.chars()
-            .map(|c| sf.h_advance(font.glyph_id(c)))
-            .sum();
-        let x_start = (img.width() as f32 - text_width) / 2.0;
+    // Helper: measure text width
+    let measure_text = |text: &str, sf: &ab_glyph::PxScaleFont<&ab_glyph::FontArc>| -> f32 {
+        text.chars().map(|c| sf.h_advance(font.glyph_id(c))).sum()
+    };
 
+    // Helper: render a line of text starting at x_start
+    let render_text_at = |img: &mut image::RgbaImage, text: &str, x_start: f32, y_baseline: f32, sf: &ab_glyph::PxScaleFont<&ab_glyph::FontArc>| {
         let mut x = x_start;
         for c in text.chars() {
             let glyph_id = font.glyph_id(c);
@@ -3165,15 +3190,32 @@ fn render_text_overlay(
         }
     };
 
-    // Render page number (centered)
-    if !page_num_text.is_empty() {
-        render_line(&mut img, page_num_text, y_offset, &scaled_font);
+    // Line 1: pageNum + printDate (if either exists)
+    if has_line1 {
+        let has_both = !page_num_text.is_empty() && !print_date_text.is_empty();
+        if has_both {
+            // Page number on the left, print date on the right
+            let _pn_w = measure_text(page_num_text, &scaled_font);
+            let pd_w = measure_text(print_date_text, &scaled_font);
+            let margin_x = img_width as f32 * 0.05; // 5% margin from edges
+            render_text_at(&mut img, page_num_text, margin_x, y_offset, &scaled_font);
+            render_text_at(&mut img, print_date_text, img_width as f32 - pd_w - margin_x, y_offset, &scaled_font);
+        } else if !page_num_text.is_empty() {
+            // Only page number: centered
+            let pn_w = measure_text(page_num_text, &scaled_font);
+            render_text_at(&mut img, page_num_text, (img_width as f32 - pn_w) / 2.0, y_offset, &scaled_font);
+        } else {
+            // Only print date: centered
+            let pd_w = measure_text(print_date_text, &scaled_font);
+            render_text_at(&mut img, print_date_text, (img_width as f32 - pd_w) / 2.0, y_offset, &scaled_font);
+        }
         y_offset += line_height;
     }
 
-    // Render print date (centered)
-    if !print_date_text.is_empty() {
-        render_line(&mut img, print_date_text, y_offset, &scaled_font);
+    // Line 2: footer text (centered)
+    if has_line2 {
+        let ft_w = measure_text(footer_text, &scaled_font);
+        render_text_at(&mut img, footer_text, (img_width as f32 - ft_w) / 2.0, y_offset, &scaled_font);
     }
 
     // Encode as PNG
@@ -3475,6 +3517,12 @@ fn build_page_ops(
             _ => continue,
         };
 
+        if slot_idx < slot_positions.len() {
+            let sp = &slot_positions[slot_idx];
+            log::info!("printpdf fallback: slot[{}] x={:.2}mm y={:.2}mm w={:.2}mm h={:.2}mm",
+                slot_idx, sp.x_mm, sp.y_mm, sp.w_mm, sp.h_mm);
+        }
+
         let rotation = slot_spec.rotation;
         let cached = match get_cached_xobj(doc, xobj_cache, file_idx, rotation, sources) {
             Some(c) => c,
@@ -3630,7 +3678,7 @@ pub fn generate_pdf_from_layout(
     let mut xobj_cache: std::collections::HashMap<(usize, i32), CachedXobj> = std::collections::HashMap::new();
 
     // Pre-load CJK font for text overlay
-    let text_font = if request.settings.page_num || request.settings.print_date {
+    let text_font = if request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty()) {
         load_system_font()
     } else {
         None
@@ -3664,8 +3712,9 @@ pub fn generate_pdf_from_layout(
         } else {
             String::new()
         };
+        let footer_text = request.settings.footer_text.clone().unwrap_or_default();
         if let Some((png_bytes, _img_w, _img_h)) = render_text_overlay(
-            &text_font, &pp_page_num_text, &pp_print_date_text, pw, request.pages.len()
+            &text_font, &pp_page_num_text, &pp_print_date_text, &footer_text, pw, request.pages.len()
         ) {
             let mut warnings = Vec::new();
             match printpdf::RawImage::decode_from_bytes(&png_bytes, &mut warnings) {
@@ -3674,13 +3723,13 @@ pub fn generate_pdf_from_layout(
                     let img_h = raw_img.height as f32;
                     let xobj_id = doc.add_image(&raw_img);
 
-                    // Position: bottom-center, 5mm from bottom
+                    // Position: bottom-center, (margin_bottom + 5mm) from bottom
                     // RawImage dimensions are in pixels; scale from RENDER_DPI to PDF pt
                     let img_w_pt = img_w * 72.0 / RENDER_DPI as f32;
                     let img_h_pt = img_h * 72.0 / RENDER_DPI as f32;
                     let pw_pt = pw * MM_TO_PT;
                     let x_pt = (pw_pt - img_w_pt) / 2.0;
-                    let y_pt = 5.0 * MM_TO_PT;
+                    let y_pt = 3.0 * MM_TO_PT; // 3mm from bottom edge
 
                     ops.push(printpdf::Op::SaveGraphicsState);
                     ops.push(printpdf::Op::UseXobject {
@@ -4196,7 +4245,7 @@ struct SlotAdjustment {
 /// Build the content stream for one output page using cm + Do operators.
 /// Each Form XObject is positioned, scaled, and rotated within its layout slot.
 fn build_nup_content_stream(
-    form_xobjs: &[(lopdf::ObjectId, f32, f32)],  // (form_xobj_id, src_w_pt, src_h_pt)
+    form_xobjs: &[(usize, lopdf::ObjectId, f32, f32)],  // (layout_slot_idx, xobj_id, src_w_pt, src_h_pt)
     slot_positions: &[LayoutSlotMm],
     settings: &RenderSettings,
     slot_adjustments: &[SlotAdjustment],  // per-slot rotation/scale/offset
@@ -4205,15 +4254,17 @@ fn build_nup_content_stream(
 
     let mut ops = Vec::new();
 
-    for (slot_idx, (_xobj_id, src_w_pt, src_h_pt)) in form_xobjs.iter().enumerate() {
-        if slot_idx >= slot_positions.len() { break; }
-        let slot = &slot_positions[slot_idx];
+    for (adj_idx, (layout_slot_idx, _xobj_id, src_w_pt, src_h_pt)) in form_xobjs.iter().enumerate() {
+        let slot = &slot_positions[*layout_slot_idx];
         let slot_w_pt = slot.w_mm * MM_TO_PT;
         let slot_h_pt = slot.h_mm * MM_TO_PT;
 
+        log::info!("build_nup: layout_slot[{}] adj[{}] x={:.2}mm y={:.2}mm w={:.2}mm h={:.2}mm",
+            layout_slot_idx, adj_idx, slot.x_mm, slot.y_mm, slot.w_mm, slot.h_mm);
+
         // Handle rotation via transformation matrix
-        let adj = if slot_idx < slot_adjustments.len() {
-            &slot_adjustments[slot_idx]
+        let adj = if adj_idx < slot_adjustments.len() {
+            &slot_adjustments[adj_idx]
         } else {
             &SlotAdjustment { rotation: 0, scale: 1.0, offset_x: 0.0, offset_y: 0.0, is_image: false }
         };
@@ -4327,7 +4378,7 @@ fn build_nup_content_stream(
         };
 
         // Build the XObject name for this Form XObject
-        let xobj_name = lopdf::Object::Name(format!("Fm{}", slot_idx).into_bytes());
+        let xobj_name = lopdf::Object::Name(format!("Fm{}", layout_slot_idx).into_bytes());
 
         // Clip to slot boundary — prevents per-slot overflow into adjacent slots
         ops.push(Operation { operator: "q".into(), operands: vec![] });
@@ -4549,6 +4600,7 @@ fn generate_pdf_passthrough(
     on_progress: Option<&ProgressFn>,
     sources: &[Option<ImageSource>],
 ) -> Result<(), String> {
+    log::info!("generate_pdf_passthrough: settings.footer_margin={}", request.settings.footer_margin);
     let (slot_positions, pw, ph) = calculate_layout_mm(&request.settings);
     let pw_pt = pw * MM_TO_PT;
     let ph_pt = ph * MM_TO_PT;
@@ -4566,12 +4618,12 @@ fn generate_pdf_passthrough(
     let mut all_page_ids: Vec<lopdf::ObjectId> = Vec::new();
 
     // Pre-load CJK font for text overlay (only if page_num or print_date is enabled)
-    let text_font = if request.settings.page_num || request.settings.print_date {
+    let text_font = if request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty()) {
         load_system_font()
     } else {
         None
     };
-    if text_font.is_none() && (request.settings.page_num || request.settings.print_date) {
+    if text_font.is_none() && (request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty())) {
         log::warn!("lopdf hybrid: text overlay enabled but font load failed, overlay will be skipped");
     }
 
@@ -4596,7 +4648,8 @@ fn generate_pdf_passthrough(
         log::info!("lopdf hybrid: page {} has {} slots", page_idx, page_spec.slots.len());
 
         // Collect Form XObjects for each slot in this page
-        let mut page_form_xobjs: Vec<(lopdf::ObjectId, f32, f32)> = Vec::new();
+        // (slot_idx, xobj_id, src_w_pt, src_h_pt) — slot_idx preserves correct layout position
+        let mut page_form_xobjs: Vec<(usize, lopdf::ObjectId, f32, f32)> = Vec::new();
         let mut slot_adjustments: Vec<SlotAdjustment> = Vec::new();
         let mut xobj_names: Vec<(std::vec::Vec<u8>, lopdf::ObjectId)> = Vec::new();
 
@@ -4663,7 +4716,7 @@ fn generate_pdf_passthrough(
 
             let xobj_name = format!("Fm{}", slot_idx);
             xobj_names.push((xobj_name.into_bytes(), xobj_id));
-            page_form_xobjs.push((xobj_id, src_w_pt, src_h_pt));
+            page_form_xobjs.push((slot_idx, xobj_id, src_w_pt, src_h_pt));
             // For image XObjects: rotation=0 because it's already baked into pixels.
             // For PDF Form XObjects: use the original slot rotation.
             let is_pdf = file.pdf_path.is_some();
@@ -4704,8 +4757,10 @@ fn generate_pdf_passthrough(
             String::new()
         };
 
+        let footer_text = request.settings.footer_text.clone().unwrap_or_default();
+
         if let Some((png_bytes, _img_w, _img_h)) = render_text_overlay(
-            &text_font, &page_num_text, &print_date_text, pw, request.pages.len()
+            &text_font, &page_num_text, &print_date_text, &footer_text, pw, request.pages.len()
         ) {
             // Embed as Image XObject (RGBA PNG → decode to raw pixels, then encode as FlateDecode)
             match image::load_from_memory(&png_bytes) {
@@ -4747,7 +4802,7 @@ fn generate_pdf_passthrough(
                     let img_w_pt = w as f32 * 72.0 / RENDER_DPI as f32;
                     let img_h_pt = h as f32 * 72.0 / RENDER_DPI as f32;
                     let x_pt = (pw_pt - img_w_pt) / 2.0; // centered horizontally
-                    let y_pt = 5.0 * MM_TO_PT; // 5mm from bottom edge
+                    let y_pt = 3.0 * MM_TO_PT; // 3mm from bottom edge
 
                     // Append to content stream: save state, position, draw image, restore state
                     use lopdf::content::Operation;
@@ -4789,6 +4844,38 @@ fn generate_pdf_passthrough(
             }
         } else {
             log::warn!("lopdf hybrid: page {} render_text_overlay returned None", page_idx);
+        }
+
+        // Add cut lines if enabled
+        if request.settings.cutline {
+            // Calculate footer cut line position
+            let has_footer = request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty());
+            let footer_cutline_y_pt = if has_footer {
+                if request.settings.custom_fm && request.settings.footer_margin > 0.0 {
+                    // 自定义下边距模式：分割线在 fm 位置
+                    Some(request.settings.footer_margin * MM_TO_PT)
+                } else {
+                    // 默认模式：分割线在页脚文本顶部 + 2mm 间隙，避免贴文字
+                    // 文本布局（从底部起）：3mm底部间距 + 行数×5mm行高
+                    let line_count = (if request.settings.page_num || request.settings.print_date { 1 } else { 0 })
+                        + (if request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty()) { 1 } else { 0 });
+                    let footer_text_top_mm = 3.0 + line_count as f32 * 5.0 + 2.0;
+                    Some(footer_text_top_mm * MM_TO_PT)
+                }
+            } else {
+                None
+            };
+            if let Some(cutline_ops) = build_cutline_ops_lopdf(&slot_positions, pw_pt, ph_pt, footer_cutline_y_pt) {
+                if !content_bytes.is_empty() {
+                    content_bytes.push(b'\n');
+                }
+                if let Ok(cutline_bytes) = cutline_ops.encode() {
+                    content_bytes.extend_from_slice(&cutline_bytes);
+                    log::info!("lopdf hybrid: page {} cut lines added", page_idx);
+                } else {
+                    log::warn!("lopdf hybrid: page {} cut line encode failed", page_idx);
+                }
+            }
         }
 
         // Create the content stream object
@@ -4866,4 +4953,138 @@ fn generate_pdf_passthrough(
     }
 
     Ok(())
+}
+
+/// Build PDF operations to draw cut lines (dashed lines at slot boundaries).
+/// Only draws lines between slots (not at page edges).
+/// Returns None if only 1 slot (no cut lines needed) and no footer cut line.
+///
+/// Coordinate system: lopdf content stream uses PDF standard bottom-left origin,
+/// same as slot_positions (bottom-up y_mm). No conversion needed.
+///
+/// `footer_cutline_y_pt`: If Some(y), draw a horizontal cut line at that y position (bottom-up pt).
+/// The caller decides the position — either at footer_margin_mm or at the top of footer text.
+#[allow(dead_code)]
+fn build_cutline_ops_lopdf(
+    slot_positions: &[LayoutSlotMm],
+    page_w_pt: f32,
+    page_h_pt: f32,
+    footer_cutline_y_pt: Option<f32>,  // bottom-up pt position for footer cut line
+) -> Option<lopdf::content::Content> {
+    use lopdf::content::Operation;
+    use std::collections::BTreeSet;
+
+    let need_row_lines = slot_positions.len() > 1;
+    let need_footer_line = footer_cutline_y_pt.is_some();
+
+    if !need_row_lines && !need_footer_line {
+        return None;
+    }
+
+    // Infer grid dimensions from unique x/y positions
+    let mut x_positions = BTreeSet::new();
+    let mut y_positions = BTreeSet::new();
+
+    for slot in slot_positions {
+        x_positions.insert((slot.x_mm * 100.0).round() as i32);
+        y_positions.insert((slot.y_mm * 100.0).round() as i32);
+    }
+
+    let cols = x_positions.len();
+    let rows = y_positions.len();
+
+    let mut ops = Vec::new();
+
+    // Save graphics state
+    ops.push(Operation { operator: "q".into(), operands: vec![] });
+
+    // Set line width (0.5 pt)
+    ops.push(Operation { operator: "w".into(), operands: vec![lopdf::Object::Real(0.5)] });
+
+    // Set dash pattern: dashed line (3 pt dash, 3 pt gap)
+    ops.push(Operation { operator: "d".into(), operands: vec![
+        lopdf::Object::Array(vec![
+            lopdf::Object::Integer(3),
+            lopdf::Object::Integer(3),
+        ]),
+        lopdf::Object::Integer(0),
+    ]});
+
+    // Set stroke color to black
+    ops.push(Operation { operator: "G".into(), operands: vec![lopdf::Object::Real(0.0)] });
+
+    // Draw vertical cut lines (between columns)
+    // Both slot_positions and PDF content stream use bottom-left origin, x increases right.
+    // Stop at footer area if present (draw only above footer, not into it).
+    if cols > 1 {
+        // In bottom-up coords: 0.0 is page bottom, page_h_pt is page top.
+        // If footer exists: draw from footer_cutline_y_pt (top of footer) UP to page top.
+        // If no footer: draw entire page from bottom to top.
+        let (y_start, y_end) = if let Some(fy) = footer_cutline_y_pt {
+            (fy, page_h_pt)
+        } else {
+            (0.0, page_h_pt)
+        };
+        for c in 1..cols {
+            // slot[c-1] right edge and slot[c] left edge
+            let left_slot = &slot_positions[(c - 1) as usize]; // row 0, col c-1
+            let right_slot = &slot_positions[c as usize];       // row 0, col c
+            let right_edge_pt = (left_slot.x_mm + left_slot.w_mm) * MM_TO_PT;
+            let left_edge_pt = right_slot.x_mm * MM_TO_PT;
+            let x = (right_edge_pt + left_edge_pt) / 2.0;
+            ops.push(Operation { operator: "m".into(), operands: vec![
+                lopdf::Object::Real(x),
+                lopdf::Object::Real(y_start),
+            ]});
+            ops.push(Operation { operator: "l".into(), operands: vec![
+                lopdf::Object::Real(x),
+                lopdf::Object::Real(y_end),
+            ]});
+            ops.push(Operation { operator: "S".into(), operands: vec![] });
+        }
+    }
+
+    // Draw horizontal cut lines (between rows)
+    // slot_positions y_mm is bottom-up, PDF content stream is also bottom-up.
+    // Between row r-1 (bottom) and row r (top): gap center in bottom-up pt.
+    if rows > 1 {
+        for r in 1..rows {
+            // bottom_slot is the row closer to the page bottom (row_from_bottom = r-1)
+            // top_slot is the row above it (row_from_bottom = r)
+            let bottom_slot = &slot_positions[(r - 1) as usize * cols]; // row r-1 from bottom
+            let top_slot = &slot_positions[r as usize * cols];           // row r from bottom
+            // bottom_slot top edge (bottom-up) = bottom_slot.y_mm + bottom_slot.h_mm
+            // top_slot bottom edge (bottom-up) = top_slot.y_mm
+            // Gap center in bottom-up mm = average, then convert to pt
+            let gap_center_mm = ((bottom_slot.y_mm + bottom_slot.h_mm) + top_slot.y_mm) / 2.0;
+            let y = gap_center_mm * MM_TO_PT;
+            ops.push(Operation { operator: "m".into(), operands: vec![
+                lopdf::Object::Real(0.0),
+                lopdf::Object::Real(y),
+            ]});
+            ops.push(Operation { operator: "l".into(), operands: vec![
+                lopdf::Object::Real(page_w_pt),
+                lopdf::Object::Real(y),
+            ]});
+            ops.push(Operation { operator: "S".into(), operands: vec![] });
+        }
+    }
+
+    // Draw footer cut line at caller-specified position (bottom-up pt)
+    if let Some(y) = footer_cutline_y_pt {
+        ops.push(Operation { operator: "m".into(), operands: vec![
+            lopdf::Object::Real(0.0),
+            lopdf::Object::Real(y),
+        ]});
+        ops.push(Operation { operator: "l".into(), operands: vec![
+            lopdf::Object::Real(page_w_pt),
+            lopdf::Object::Real(y),
+        ]});
+        ops.push(Operation { operator: "S".into(), operands: vec![] });
+    }
+
+    // Restore graphics state
+    ops.push(Operation { operator: "Q".into(), operands: vec![] });
+
+    Some(lopdf::content::Content { operations: ops })
 }

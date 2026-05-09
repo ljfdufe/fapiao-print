@@ -73,10 +73,10 @@
       </div>
       <div class="sec">
         <div class="sec-title">📐 边距 (mm)</div>
-        <div class="row"><label class="lbl">上</label><div class="rr ctrl"><input type="range" id="marginTop" min="0" max="30" value="5" oninput="syncSlider(this,'marginTopN');updatePreview()"><input type="number" id="marginTopN" min="0" max="30" value="5" style="width:48px" onchange="syncRange(this,'marginTop');updatePreview()"></div></div>
-        <div class="row"><label class="lbl">下</label><div class="rr ctrl"><input type="range" id="marginBottom" min="0" max="30" value="5" oninput="syncSlider(this,'marginBottomN');updatePreview()"><input type="number" id="marginBottomN" min="0" max="30" value="5" style="width:48px" onchange="syncRange(this,'marginBottom');updatePreview()"></div></div>
-        <div class="row"><label class="lbl">左</label><div class="rr ctrl"><input type="range" id="marginLeft" min="0" max="30" value="5" oninput="syncSlider(this,'marginLeftN');updatePreview()"><input type="number" id="marginLeftN" min="0" max="30" value="5" style="width:48px" onchange="syncRange(this,'marginLeft');updatePreview()"></div></div>
-        <div class="row"><label class="lbl">右</label><div class="rr ctrl"><input type="range" id="marginRight" min="0" max="30" value="5" oninput="syncSlider(this,'marginRightN');updatePreview()"><input type="number" id="marginRightN" min="0" max="30" value="5" style="width:48px" onchange="syncRange(this,'marginRight');updatePreview()"></div></div>
+        <div class="row"><label class="lbl">上</label><div class="rr ctrl"><input type="range" id="marginTop" min="0" max="30" value="5" oninput="syncSlider(this,'marginTopN');updatePreview()"><input type="number" id="marginTopN" min="0" max="30" value="5" style="width:64px" onchange="syncRange(this,'marginTop');updatePreview()"></div></div>
+        <div class="row"><label class="lbl">下</label><div class="rr ctrl"><input type="range" id="marginBottom" min="0" max="30" value="5" oninput="syncSlider(this,'marginBottomN');updatePreview()"><input type="number" id="marginBottomN" min="0" max="30" value="5" style="width:64px" onchange="syncRange(this,'marginBottom');updatePreview()"></div></div>
+        <div class="row"><label class="lbl">左</label><div class="rr ctrl"><input type="range" id="marginLeft" min="0" max="30" value="5" oninput="syncSlider(this,'marginLeftN');updatePreview()"><input type="number" id="marginLeftN" min="0" max="30" value="5" style="width:64px" onchange="syncRange(this,'marginLeft');updatePreview()"></div></div>
+        <div class="row"><label class="lbl">右</label><div class="rr ctrl"><input type="range" id="marginRight" min="0" max="30" value="5" oninput="syncSlider(this,'marginRightN');updatePreview()"><input type="number" id="marginRightN" min="0" max="30" value="5" style="width:64px" onchange="syncRange(this,'marginRight');updatePreview()"></div></div>
         <div style="display:flex;gap:6px;margin-top:6px">
           <button class="btn btn-sm" style="flex:1" onclick="setMP(10,10,10,10)">10mm</button>
           <button class="btn btn-sm" style="flex:1" onclick="setMP(5,5,5,5)">5mm</button>
@@ -152,8 +152,14 @@
       <div class="sec">
         <div class="sec-title">📄 页面选项</div>
         <div class="row"><label class="lbl">顺序</label><div class="ctrl"><select id="pageOrder" onchange="updatePreview()"><option value="normal">正向</option><option value="reverse">反向</option></select></div></div>
-        <div class="trow" style="opacity:0.45;pointer-events:none" title="功能暂未就绪"><label class="tlbl">打印页码</label><button class="tgl" id="togglePageNum" disabled></button></div>
-        <div class="trow" style="opacity:0.45;pointer-events:none" title="功能暂未就绪"><label class="tlbl">打印日期</label><button class="tgl" id="toggleDate" disabled></button></div>
+        <div class="trow"><label class="tlbl">打印页码</label><button class="tgl" id="togglePageNum" onclick="toggleFeature('pageNum',this)"></button></div>
+        <div class="trow"><label class="tlbl">打印日期</label><button class="tgl" id="toggleDate" onclick="toggleFeature('printDate',this)"></button></div>
+        <div class="trow"><label class="tlbl">自定义页脚</label><button class="tgl" id="toggleFooter" onclick="toggleFeature('footer',this)"></button></div>
+        <div id="footerOpts" style="display:none;margin-top:6px;padding:6px 8px;background:var(--bg-main);border-radius:6px">
+          <input type="text" id="footerText" placeholder="输入页脚内容（留空则无页脚）" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;background:var(--bg-input);color:var(--text);box-sizing:border-box">
+        </div>
+        <div id="customFMRow" class="trow" style="display:none"><label class="tlbl">自定义下边距</label><button class="tgl" id="toggleCustomFM" onclick="toggleFeature('customFM',this)"></button></div>
+        <div id="footerMarginRow" class="row" style="display:none;margin-top:4px"><label class="lbl">下边距</label><div class="rr ctrl"><input type="range" id="footerMargin" min="0" max="30" value="8" oninput="syncSlider(this,'footerMarginN');updatePreview()"><input type="number" id="footerMarginN" min="0" max="30" value="8" style="width:64px" onchange="syncRange(this,'footerMargin');updatePreview()"></div></div>
         <div class="trow"><label class="tlbl">打印前确认</label><button class="tgl on" id="toggleConfirm" onclick="toggleFeature('confirmPrint',this)"></button></div>
       </div>
       <div class="sec" style="display:flex;flex-direction:column;gap:8px">
@@ -172,7 +178,7 @@
       </div>
       <div class="sec" id="pdfTextSection">
         <div class="sec-title">📝 PDF 文字提取</div>
-        <div class="trow"><label class="tlbl">自动提取</label><button class="tgl" id="togglePdfText" onclick="togglePref('pdfTextEnabled',this)"></button></div>
+        <div class="trow"><label class="tlbl">自动提取</label><button class="tgl on" id="togglePdfText" onclick="togglePref('pdfTextEnabled',this)"></button></div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">开启后从 PDF 文字层提取发票字段（销售方、金额等），无需 OCR。对扫描件/图片 PDF 无效。默认关闭以提高加载速度；需要结构化字段时再开启。</div>
       </div>
       <div class="sec">

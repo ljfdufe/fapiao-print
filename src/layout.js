@@ -17,14 +17,22 @@ function calculateLayout(settings, pxPerMm) {
   var ph = settings.paperH * pxPerMm;
   var mt = settings.marginTop * pxPerMm;
   var mb = settings.marginBottom * pxPerMm;
+  var fm = (settings.footerMargin || 0) * pxPerMm; // 页脚边距（独立于发票边距）
   var ml = settings.marginLeft * pxPerMm;
   var mr = settings.marginRight * pxPerMm;
   var gh = settings.gapH * pxPerMm;
   var gv = settings.gapV * pxPerMm;
 
-  // Per-slot margins: each invoice has its own margin within its slot
+  // The fm area is reserved purely for footer text below all rows.
+  // Only deduct footer margin from slot height when there is footer content.
+  // In customFM mode: deduct the explicit footerMargin value.
+  // In auto mode: deduct the auto-computed footer height (auto_fm).
+  // When there is no footer content: no deduction (no footer to collide with).
+  var hasFooterContent = settings.pageNum || settings.printDate || (settings.footerText || '').trim();
+  var autoFm = 3 + ((settings.pageNum || settings.printDate ? 1 : 0) + ((settings.footerText || '').trim() ? 1 : 0)) * 5;
+  var effectiveFm = hasFooterContent ? (settings.customFM ? fm : autoFm * pxPerMm) : 0;
   var sw = (pw - settings.cols * (ml + mr) - (settings.cols - 1) * gh) / settings.cols;
-  var sh = (ph - settings.rows * (mt + mb) - (settings.rows - 1) * gv) / settings.rows;
+  var sh = (ph - settings.rows * (mt + mb) - (settings.rows - 1) * gv - effectiveFm) / settings.rows;
 
   // Calculate slot positions
   var slots = [];
@@ -39,18 +47,39 @@ function calculateLayout(settings, pxPerMm) {
     }
   }
 
-  // Cut line positions
+  // Cut line positions — based on actual slot boundaries (not page averages)
   var cutLines = [];
-  if (settings.cutline && (settings.cols > 1 || settings.rows > 1)) {
+  if (settings.cutline && (settings.cols > 1 || settings.rows > 1 || hasFooterContent)) {
+    // Horizontal cut lines: between adjacent rows
     for (var r = 1; r < settings.rows; r++) {
-      cutLines.push({ type: 'horizontal', pos: r * (sh + mt + mb + gv) - gv / 2 });
+      // slot[r-1] bottom edge (top-down) and slot[r] top edge (top-down)
+      var slotTopY = mt + r * (sh + mt + mb + gv);       // slot[r].y
+      var slotPrevBottomY = mt + (r - 1) * (sh + mt + mb + gv) + sh; // slot[r-1].y + sh
+      cutLines.push({ type: 'horizontal', pos: (slotPrevBottomY + slotTopY) / 2 });
     }
+    // Footer cut line: between bottom row and footer area
+    if (hasFooterContent) {
+      if (settings.customFM && fm > 0) {
+        // 自定义下边距模式：分割线在用户指定的 fm 位置
+        cutLines.push({ type: 'horizontal', pos: ph - fm });
+      } else {
+        // 默认模式：分割线在页脚文本顶部 + 2mm 间隙，避免贴文字
+        // 文本布局（从底部起）：3mm底部间距 + 行数×5mm行高
+        var footerLineCount = (settings.pageNum || settings.printDate ? 1 : 0) + ((settings.footerText || '').trim() ? 1 : 0);
+        var footerTextTopMm = 3 + footerLineCount * 5 + 2; // 从页面底部算起（mm）
+        cutLines.push({ type: 'horizontal', pos: ph - footerTextTopMm * pxPerMm });
+      }
+    }
+    // Vertical cut lines: between adjacent columns (stop at footer area if present)
+    var vLineEndY = hasFooterContent ? ph - effectiveFm : ph;
     for (var c = 1; c < settings.cols; c++) {
-      cutLines.push({ type: 'vertical', pos: c * (sw + ml + mr + gh) - gh / 2 });
+      var slotLeftX = ml + c * (sw + ml + mr + gh);       // slot[c].x
+      var slotPrevRightX = ml + (c - 1) * (sw + ml + mr + gh) + sw; // slot[c-1].x + sw
+      cutLines.push({ type: 'vertical', pos: (slotPrevRightX + slotLeftX) / 2, endY: vLineEndY });
     }
   }
 
-  return { pw: pw, ph: ph, mt: mt, mb: mb, ml: ml, mr: mr, gh: gh, gv: gv, sw: sw, sh: sh, slots: slots, cutLines: cutLines };
+  return { pw: pw, ph: ph, mt: mt, mb: mb, fm: fm, ml: ml, mr: mr, gh: gh, gv: gv, sw: sw, sh: sh, slots: slots, cutLines: cutLines };
 }
 
 /**
@@ -156,16 +185,35 @@ function renderPage(pageFiles, pi, total, s) {
     if (line.type === 'horizontal') {
       html += '<div class="cut-line" style="top:' + (line.pos * scale) + 'px"></div>';
     } else {
-      html += '<div class="cut-line-v" style="left:' + (line.pos * scale) + 'px"></div>';
+      var vStyle = 'left:' + (line.pos * scale) + 'px';
+      if (line.endY !== undefined) vStyle += ';height:' + (line.endY * scale) + 'px';
+      html += '<div class="cut-line-v" style="' + vStyle + '"></div>';
     }
   }
 
-  if (s.pageNum) html += '<div style="position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8">第 ' + (pi + 1) + ' 页 / 共 ' + total + ' 页</div>';
+  // 页脚文本行序（从下到上）：自定义页脚 → 页码/日期
+  // 所有位置和字号必须乘以 scale，与 slot 坐标系一致
+  var textBottomPx = 3 * MM2PX * scale;
+  var lineHeightPx = 5 * MM2PX * scale;
+  var footerFontSize = Math.max(8, 10 * scale);
+
+  // 自定义页脚：最下面一行
+  var footerText = (s.footerText || '').trim();
+  if (footerText) {
+    html += '<div style="position:absolute;bottom:' + textBottomPx + 'px;left:0;right:0;text-align:center;font-size:' + footerFontSize + 'px;color:#94a3b8">' + escHtml(footerText) + '</div>';
+  }
+
+  // 页码/日期：在自定义页脚上方
+  var pageNumBottomPx = textBottomPx;
+  if (footerText) pageNumBottomPx += lineHeightPx;
+  if (s.pageNum) {
+    var pageNumStyle = s.printDate ? 'position:absolute;bottom:' + pageNumBottomPx + 'px;left:' + (10 * MM2PX * scale) + 'px;font-size:' + footerFontSize + 'px;color:#94a3b8' : 'position:absolute;bottom:' + pageNumBottomPx + 'px;left:0;right:0;text-align:center;font-size:' + footerFontSize + 'px;color:#94a3b8';
+    html += '<div style="' + pageNumStyle + '">第 ' + (pi + 1) + ' 页 / 共 ' + total + ' 页</div>';
+  }
   if (s.printDate) {
     var now = new Date();
     var dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    // If pageNum is also shown, put date on the right; otherwise center it
-    var dateStyle = s.pageNum ? 'position:absolute;bottom:5px;right:10px;font-size:10px;color:#94a3b8' : 'position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:#94a3b8';
+    var dateStyle = s.pageNum ? 'position:absolute;bottom:' + pageNumBottomPx + 'px;right:' + (10 * MM2PX * scale) + 'px;font-size:' + footerFontSize + 'px;color:#94a3b8' : 'position:absolute;bottom:' + pageNumBottomPx + 'px;left:0;right:0;text-align:center;font-size:' + footerFontSize + 'px;color:#94a3b8';
     html += '<div style="' + dateStyle + '">打印日期 ' + dateStr + '</div>';
   }
 

@@ -34,10 +34,11 @@ var S = {
   feat: {
     cutline: true, number: false, border: false, trimWhite: false,
     watermark: false, collate: true, duplex: false, pageNum: false,
-    printDate: false, confirmPrint: true,
+    printDate: false, footer: false, confirmPrint: true,
     autoOpenPdf: true,
     ocrEnabled: false,
-    pdfTextEnabled: false  // PDF文字层提取（默认关闭以提高加载速度）
+    pdfTextEnabled: false,  // PDF文字层提取（默认关闭以提高加载速度）
+    customFM: false
   }
 };
 
@@ -1399,10 +1400,42 @@ function quickLayout(c, r) {
   document.getElementById('customCols').value = c;
 }
 function toggleFeature(k, btn) {
-  if (k === 'pageNum' || k === 'printDate') return; // 功能暂未就绪，禁止开启
-  btn.classList.toggle('on', S.feat[k]);
+  var isOn = !S.feat[k]; // 切换后的状态
+  S.feat[k] = isOn;
+  btn.classList.toggle('on', isOn);
+
+  var targets = ['pageNum', 'printDate', 'footer', 'customFM'];
+  var isTarget = targets.indexOf(k) >= 0;
+
+  if (isTarget) {
+    // 按行数计算页脚边距：pageNum+printDate 共享一行，footerText 单独一行
+    var lineCount = (S.feat.pageNum || S.feat.printDate ? 1 : 0) + (S.feat.footer ? 1 : 0);
+    var fmRow = document.getElementById('footerMarginRow');
+    var cfmRow = document.getElementById('customFMRow');
+
+    // "自定义下边距"开关行：任何页脚功能开启时显示
+    if (cfmRow) cfmRow.style.display = lineCount > 0 ? 'flex' : 'none';
+
+    if (S.feat.customFM && lineCount > 0) {
+      // 自定义下边距模式：显示滑块，自动设置最小值
+      var minFM = lineCount >= 2 ? 16 : 8;
+      var currentFM = parseFloat(document.getElementById('footerMargin').value) || 0;
+      if (currentFM < minFM) {
+        document.getElementById('footerMargin').value = minFM;
+        document.getElementById('footerMarginN').value = minFM;
+      }
+      if (fmRow) fmRow.style.display = 'flex';
+    } else {
+      // 默认模式或全部关闭：隐藏滑块
+      if (fmRow) fmRow.style.display = 'none';
+    }
+  }
+
   if (k === 'watermark') document.getElementById('wmOpts').style.display = S.feat[k] ? 'block' : 'none';
   if (k === 'trimWhite' && S.feat[k]) processTrim();
+  if (k === 'footer') {
+    document.getElementById('footerOpts').style.display = S.feat[k] ? 'block' : 'none';
+  }
   updatePreview();
 }
 function setLayoutPreset(c, r, orient, el) {
@@ -1502,6 +1535,13 @@ async function processTrim() {
   }
 }
 
+// Auto-calculate footer margin based on line count
+// Must be >= actual text height (3mm bottom + lineCount * 5mm line height)
+function _autoFooterMargin() {
+  var lineCount = (S.feat.pageNum || S.feat.printDate ? 1 : 0) + (S.feat.footer ? 1 : 0);
+  return 3 + lineCount * 5; // matches text layout: 3mm bottom padding + 5mm per line
+}
+
 // =====================================================
 // Get settings
 // =====================================================
@@ -1532,6 +1572,9 @@ function getSettings() {
     watermarkAngle: parseFloat(document.getElementById('wmAngle').value),
     watermarkSize: parseFloat(document.getElementById('wmSize').value),
     pageNum: S.feat.pageNum, printDate: S.feat.printDate,
+    footerText: S.feat.footer ? document.getElementById('footerText').value : '',
+    footerMargin: (S.feat.pageNum || S.feat.printDate || S.feat.footer) ? (S.feat.customFM ? parseFloat(document.getElementById('footerMargin').value) || 0 : _autoFooterMargin()) : 0,
+    customFm: S.feat.customFM,
     copies: parseInt(document.getElementById('copies').value) || 1,
     collate: S.feat.collate, duplex: S.feat.duplex,
     printerName: document.getElementById('printerSel').value || null
@@ -1723,7 +1766,7 @@ function exportSettings() {
 function resetSettings() {
   if (!confirm('确认恢复所有默认设置？')) return;
   S.layout = { cols: 1, rows: 1 };
-  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: false };
+  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true };
   S.ocrPrecision = 'standard';
   S.viewZoom = 0;
   document.getElementById('paperSize').value = 'A4';
@@ -1992,9 +2035,14 @@ document.getElementById('orientation').value = 'landscape';
     }
   }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', showApp);
+    document.addEventListener('DOMContentLoaded', function() { showApp(); bindFooterTextEvent(); });
   } else {
-    showApp();
+    showApp(); bindFooterTextEvent();
   }
   setTimeout(showApp, 2000);
 })();
+
+function bindFooterTextEvent() {
+  var el = document.getElementById('footerText');
+  if (el) el.addEventListener('input', function() { updatePreview(); });
+}
