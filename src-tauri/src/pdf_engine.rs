@@ -2936,6 +2936,7 @@ pub struct RenderSettings {
     pub watermark_color: String,
     pub watermark_opacity: f32,
     pub watermark_angle: f32,
+    pub watermark_size: f32,
     pub border_width: Option<f32>,
     pub border_color: Option<String>,
     pub trim_white: Option<bool>,
@@ -3231,6 +3232,222 @@ fn render_text_overlay(
             None
         }
     }
+}
+
+/// Render slot numbers as small PNG images with background box.
+/// Returns Vec of (png_bytes, width_px, height_px) for each slot.
+fn render_slot_numbers(
+    font: &Option<ab_glyph::FontArc>,
+    slot_positions: &[LayoutSlotMm],
+    start_number: usize,
+) -> Vec<(Vec<u8>, u32, u32)> {
+    log::info!("render_slot_numbers: called with {} slots, start_number={}", slot_positions.len(), start_number);
+
+    if slot_positions.is_empty() {
+        return vec![];
+    }
+
+    let font = match font {
+        Some(f) => f,
+        None => {
+            log::warn!("render_slot_numbers: no font available");
+            return vec![];
+        }
+    };
+
+    let mut results = Vec::new();
+    let px_per_mm = RENDER_DPI as f32 / 25.4;
+    let font_size = (3.5 * px_per_mm) as f32;
+    let scaled_font = font.as_scaled(font_size);
+
+    for (i, _slot) in slot_positions.iter().enumerate() {
+        let num = start_number + i;
+        let num_str = num.to_string();
+
+        let mut text_width = 0.0f32;
+        for c in num_str.chars() {
+            text_width += scaled_font.h_advance(font.glyph_id(c));
+        }
+
+        let padding_x = font_size * 0.5;
+        let _padding_y = font_size * 0.3;
+        let img_w = (text_width + padding_x * 2.0).ceil() as u32;
+        let img_h = (font_size * 1.6).ceil() as u32;
+        let mut img = image::RgbaImage::new(img_w, img_h);
+
+        let bg_color = image::Rgba([0, 0, 0, 140]);
+        let text_color = [255u8, 255u8, 255u8, 255u8];
+
+        for y in 0..img_h {
+            for x in 0..img_w {
+                img.put_pixel(x, y, bg_color);
+            }
+        }
+
+        let x_start = padding_x;
+        let y_baseline = (img_h as f32 + font_size * 0.6) / 2.0;
+
+        let mut x = x_start;
+        for c in num_str.chars() {
+            let glyph_id = font.glyph_id(c);
+            let glyph = ab_glyph::Glyph {
+                id: glyph_id,
+                scale: font_size.into(),
+                position: ab_glyph::point(x, y_baseline),
+            };
+            if let Some(q) = font.outline_glyph(glyph) {
+                let bb = q.px_bounds();
+                let x_draw = bb.min.x;
+                let y_draw = bb.min.y;
+                q.draw(|gx, gy, v| {
+                    let px = (x_draw + gx as f32) as i32;
+                    let py = (y_draw + gy as f32) as i32;
+                    if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                        let alpha = (v * text_color[3] as f32) as u8;
+                        let pixel = img.get_pixel_mut(px as u32, py as u32);
+                        if alpha > pixel[3] {
+                            *pixel = image::Rgba([text_color[0], text_color[1], text_color[2], alpha]);
+                        }
+                    }
+                });
+            }
+            x += scaled_font.h_advance(glyph_id);
+        }
+
+        let mut png_buf = Vec::new();
+        if img.write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png).is_ok() {
+            results.push((png_buf, img_w, img_h));
+        }
+    }
+
+    results
+}
+
+/// Render watermark text as a single PNG tile, optionally rotated.
+/// Returns (png_bytes, width_px, height_px) or None.
+fn render_watermark(
+    font: &Option<ab_glyph::FontArc>,
+    watermark_text: &str,
+    color: &str,
+    opacity: f32,
+    font_size_mm: f32,
+    angle_deg: f32,
+) -> Option<(Vec<u8>, u32, u32)> {
+    log::info!("render_watermark: text='{}', color='{}', opacity={}, font_size={}mm, angle={}",
+        watermark_text, color, opacity, font_size_mm, angle_deg);
+
+    if watermark_text.is_empty() || font.is_none() {
+        return None;
+    }
+
+    let font = font.as_ref().unwrap();
+
+    let (r, g, b) = parse_hex_color(color).unwrap_or((0.5, 0.5, 0.5));
+
+    let px_per_mm = RENDER_DPI as f32 / 25.4;
+    let font_size = (font_size_mm * px_per_mm) as f32;
+    let scaled_font = font.as_scaled(font_size);
+
+    let mut text_width = 0.0f32;
+    for c in watermark_text.chars() {
+        text_width += scaled_font.h_advance(font.glyph_id(c));
+    }
+    let text_height = font_size;
+
+    let tile_w = (text_width * 1.2).ceil() as u32;
+    let tile_h = (text_height * 1.5).ceil() as u32;
+    let mut img = image::RgbaImage::new(tile_w, tile_h);
+
+    let text_color = [
+        (r * 255.0) as u8,
+        (g * 255.0) as u8,
+        (b * 255.0) as u8,
+        (opacity * 255.0) as u8,
+    ];
+
+    let x_start = (tile_w as f32 - text_width) / 2.0;
+    let y_baseline = tile_h as f32 * 0.65;
+
+    let mut x = x_start;
+    for c in watermark_text.chars() {
+        let glyph_id = font.glyph_id(c);
+        let glyph = ab_glyph::Glyph {
+            id: glyph_id,
+            scale: font_size.into(),
+            position: ab_glyph::point(x, y_baseline),
+        };
+        if let Some(q) = font.outline_glyph(glyph) {
+            let bb = q.px_bounds();
+            let x_draw = bb.min.x;
+            let y_draw = bb.min.y;
+            q.draw(|gx, gy, v| {
+                let px = (x_draw + gx as f32) as i32;
+                let py = (y_draw + gy as f32) as i32;
+                if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                    let alpha = (v * text_color[3] as f32) as u8;
+                    let pixel = img.get_pixel_mut(px as u32, py as u32);
+                    if alpha > pixel[3] {
+                        *pixel = image::Rgba([text_color[0], text_color[1], text_color[2], alpha]);
+                    }
+                }
+            });
+        }
+        x += scaled_font.h_advance(glyph_id);
+    }
+
+    let rotated = if angle_deg.abs() > 0.1 {
+        let angle_rad = angle_deg * std::f32::consts::PI / 180.0;
+        let cos_a = angle_rad.cos();
+        let sin_a = angle_rad.sin();
+        let cx = tile_w as f32 / 2.0;
+        let cy = tile_h as f32 / 2.0;
+        let new_w = ((tile_w as f32 * cos_a.abs()) + (tile_h as f32 * sin_a.abs())).ceil() as u32;
+        let new_h = ((tile_w as f32 * sin_a.abs()) + (tile_h as f32 * cos_a.abs())).ceil() as u32;
+        let mut rotated = image::RgbaImage::new(new_w, new_h);
+        for y in 0..tile_h {
+            for x in 0..tile_w {
+                let p = img.get_pixel(x, y);
+                if p[3] > 0 {
+                    let rx = x as f32 - cx;
+                    let ry = y as f32 - cy;
+                    let dx = rx * cos_a - ry * sin_a;
+                    let dy = rx * sin_a + ry * cos_a;
+                    let nx = (dx + new_w as f32 / 2.0) as i32;
+                    let ny = (dy + new_h as f32 / 2.0) as i32;
+                    if nx >= 0 && ny >= 0 && (nx as u32) < new_w && (ny as u32) < new_h {
+                        let existing = rotated.get_pixel(nx as u32, ny as u32);
+                        if p[3] > existing[3] {
+                            rotated.put_pixel(nx as u32, ny as u32, *p);
+                        }
+                    }
+                }
+            }
+        }
+        rotated
+    } else {
+        img
+    };
+
+    let final_w = rotated.width();
+    let final_h = rotated.height();
+
+    let mut png_buf = Vec::new();
+    if rotated.write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png).is_ok() {
+        Some((png_buf, final_w, final_h))
+    } else {
+        None
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<(f32, f32, f32)> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+    Some((r, g, b))
 }
 
 /// Apply grayscale or B&W conversion to an image.
@@ -4617,13 +4834,18 @@ fn generate_pdf_passthrough(
     let pages_id = output_doc.new_object_id();
     let mut all_page_ids: Vec<lopdf::ObjectId> = Vec::new();
 
-    // Pre-load CJK font for text overlay (only if page_num or print_date is enabled)
-    let text_font = if request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty()) {
+    // Pre-load CJK font for text overlay (page_num, print_date, footer, number, watermark)
+    let needs_text_font = request.settings.page_num
+        || request.settings.print_date
+        || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty())
+        || request.settings.number
+        || (request.settings.watermark && request.settings.watermark_text.as_ref().map_or(false, |t| !t.is_empty()));
+    let text_font = if needs_text_font {
         load_system_font()
     } else {
         None
     };
-    if text_font.is_none() && (request.settings.page_num || request.settings.print_date || request.settings.footer_text.as_ref().map_or(false, |t| !t.is_empty())) {
+    if text_font.is_none() && needs_text_font {
         log::warn!("lopdf hybrid: text overlay enabled but font load failed, overlay will be skipped");
     }
 
@@ -4652,6 +4874,7 @@ fn generate_pdf_passthrough(
         let mut page_form_xobjs: Vec<(usize, lopdf::ObjectId, f32, f32)> = Vec::new();
         let mut slot_adjustments: Vec<SlotAdjustment> = Vec::new();
         let mut xobj_names: Vec<(std::vec::Vec<u8>, lopdf::ObjectId)> = Vec::new();
+        let mut filled_slot_indices: Vec<usize> = Vec::new();
 
         for (slot_idx, slot) in page_spec.slots.iter().enumerate() {
             let file_idx = match slot.file_index {
@@ -4717,6 +4940,7 @@ fn generate_pdf_passthrough(
             let xobj_name = format!("Fm{}", slot_idx);
             xobj_names.push((xobj_name.into_bytes(), xobj_id));
             page_form_xobjs.push((slot_idx, xobj_id, src_w_pt, src_h_pt));
+            filled_slot_indices.push(slot_idx);
             // For image XObjects: rotation=0 because it's already baked into pixels.
             // For PDF Form XObjects: use the original slot rotation.
             let is_pdf = file.pdf_path.is_some();
@@ -4846,6 +5070,177 @@ fn generate_pdf_passthrough(
             log::warn!("lopdf hybrid: page {} render_text_overlay returned None", page_idx);
         }
 
+        // Add slot numbers if enabled
+        if request.settings.number {
+            log::info!("lopdf hybrid: page {} adding slot numbers", page_idx);
+            let start_num = page_idx * request.settings.cols as usize * request.settings.rows as usize + 1;
+            let num_images = render_slot_numbers(&text_font, &slot_positions, start_num);
+            // Only add numbers for filled slots, matched by index
+            for slot_idx in filled_slot_indices.iter() {
+                let num_idx = *slot_idx;
+                if num_idx >= num_images.len() {
+                    continue;
+                }
+                let (png_bytes, _w, _h) = &num_images[num_idx];
+                match image::load_from_memory(&png_bytes) {
+                    Ok(rgba_img) => {
+                        let rgba_img = rgba_img.to_rgba8();
+                        let (w, h) = rgba_img.dimensions();
+                        let alpha_bytes: Vec<u8> = rgba_img.pixels().map(|p| p[3]).collect();
+                        let rgb_bytes: Vec<u8> = rgba_img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+
+                        use lopdf::Dictionary as LopdfDict;
+                        let smask_dict = LopdfDict::from_iter(vec![
+                            ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                            ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                            ("Width", lopdf::Object::Integer(w as i64)),
+                            ("Height", lopdf::Object::Integer(h as i64)),
+                            ("ColorSpace", lopdf::Object::Name(b"DeviceGray".to_vec())),
+                            ("BitsPerComponent", lopdf::Object::Integer(8)),
+                        ]);
+                        let smask_stream = lopdf::Stream::new(smask_dict, alpha_bytes).with_compression(true);
+                        let smask_id = output_doc.add_object(smask_stream);
+
+                        let img_dict = LopdfDict::from_iter(vec![
+                            ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                            ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                            ("Width", lopdf::Object::Integer(w as i64)),
+                            ("Height", lopdf::Object::Integer(h as i64)),
+                            ("ColorSpace", lopdf::Object::Name(b"DeviceRGB".to_vec())),
+                            ("BitsPerComponent", lopdf::Object::Integer(8)),
+                            ("SMask", lopdf::Object::Reference(smask_id)),
+                        ]);
+                        let img_stream = lopdf::Stream::new(img_dict, rgb_bytes).with_compression(true);
+                        let num_xobj_id = output_doc.add_object(img_stream);
+
+                        let slot = &slot_positions[*slot_idx];
+                        let img_w_pt = w as f32 * 72.0 / RENDER_DPI as f32;
+                        let img_h_pt = h as f32 * 72.0 / RENDER_DPI as f32;
+                        let padding_pt = 2.0 * MM_TO_PT;
+                        let x_pt = (slot.x_mm + slot.w_mm) * MM_TO_PT - img_w_pt - padding_pt;
+                        let y_pt = (slot.y_mm + slot.h_mm) * MM_TO_PT - img_h_pt;
+
+                        use lopdf::content::Operation;
+                        let name = format!("Num{}", *slot_idx);
+                        let mut num_ops = Vec::new();
+                        num_ops.push(Operation { operator: "q".into(), operands: vec![] });
+                        num_ops.push(Operation { operator: "cm".into(), operands: vec![
+                            lopdf::Object::Real(img_w_pt),
+                            lopdf::Object::Real(0.0),
+                            lopdf::Object::Real(0.0),
+                            lopdf::Object::Real(img_h_pt),
+                            lopdf::Object::Real(x_pt),
+                            lopdf::Object::Real(y_pt),
+                        ]});
+                        num_ops.push(Operation { operator: "Do".into(), operands: vec![
+                            lopdf::Object::Name(name.clone().into_bytes()),
+                        ]});
+                        num_ops.push(Operation { operator: "Q".into(), operands: vec![] });
+
+                        let num_content = lopdf::content::Content { operations: num_ops };
+                        if let Ok(num_bytes) = num_content.encode() {
+                            if !content_bytes.is_empty() {
+                                content_bytes.push(b'\n');
+                            }
+                            content_bytes.extend_from_slice(&num_bytes);
+                            xobj_names.push((name.into_bytes(), num_xobj_id));
+                            log::info!("lopdf hybrid: page {} number added at x={:.1} y={:.1}", page_idx, x_pt, y_pt);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("lopdf hybrid: page {} number decode failed: {}", page_idx, e);
+                    }
+                }
+            }
+        }
+
+        // Add watermark if enabled
+        if request.settings.watermark {
+            let wm_text = request.settings.watermark_text.clone().unwrap_or_default();
+            if !wm_text.is_empty() {
+                let wm_color = request.settings.watermark_color.clone();
+                let wm_opacity = request.settings.watermark_opacity;
+                let wm_size = request.settings.watermark_size;
+                let wm_angle = request.settings.watermark_angle;
+                if let Some((png_bytes, _w, _h)) = render_watermark(&text_font, &wm_text, &wm_color, wm_opacity, wm_size, wm_angle) {
+                    match image::load_from_memory(&png_bytes) {
+                        Ok(rgba_img) => {
+                            let rgba_img = rgba_img.to_rgba8();
+                            let (w, h) = rgba_img.dimensions();
+                            let alpha_bytes: Vec<u8> = rgba_img.pixels().map(|p| p[3]).collect();
+                            let rgb_bytes: Vec<u8> = rgba_img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+
+                            use lopdf::Dictionary as LopdfDict;
+                            let smask_dict = LopdfDict::from_iter(vec![
+                                ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                                ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                                ("Width", lopdf::Object::Integer(w as i64)),
+                                ("Height", lopdf::Object::Integer(h as i64)),
+                                ("ColorSpace", lopdf::Object::Name(b"DeviceGray".to_vec())),
+                                ("BitsPerComponent", lopdf::Object::Integer(8)),
+                            ]);
+                            let smask_stream = lopdf::Stream::new(smask_dict, alpha_bytes).with_compression(true);
+                            let smask_id = output_doc.add_object(smask_stream);
+
+                            let img_dict = LopdfDict::from_iter(vec![
+                                ("Type", lopdf::Object::Name(b"XObject".to_vec())),
+                                ("Subtype", lopdf::Object::Name(b"Image".to_vec())),
+                                ("Width", lopdf::Object::Integer(w as i64)),
+                                ("Height", lopdf::Object::Integer(h as i64)),
+                                ("ColorSpace", lopdf::Object::Name(b"DeviceRGB".to_vec())),
+                                ("BitsPerComponent", lopdf::Object::Integer(8)),
+                                ("SMask", lopdf::Object::Reference(smask_id)),
+                            ]);
+                            let img_stream = lopdf::Stream::new(img_dict, rgb_bytes).with_compression(true);
+                            let wm_xobj_id = output_doc.add_object(img_stream);
+
+                            for slot_idx in filled_slot_indices.iter() {
+                                let slot_idx = *slot_idx;
+                                if slot_idx >= slot_positions.len() {
+                                    continue;
+                                }
+                                let slot = &slot_positions[slot_idx];
+                                let img_w_pt = w as f32 * 72.0 / RENDER_DPI as f32;
+                                let img_h_pt = h as f32 * 72.0 / RENDER_DPI as f32;
+                                let x_pt = slot.x_mm * MM_TO_PT + (slot.w_mm * MM_TO_PT - img_w_pt) / 2.0;
+                                let y_pt = slot.y_mm * MM_TO_PT + (slot.h_mm * MM_TO_PT - img_h_pt) / 2.0;
+
+                                use lopdf::content::Operation;
+                                let name = format!("Wm{}", page_idx * 100 + slot_idx);
+                                let mut wm_ops = Vec::new();
+                                wm_ops.push(Operation { operator: "q".into(), operands: vec![] });
+                                wm_ops.push(Operation { operator: "cm".into(), operands: vec![
+                                    lopdf::Object::Real(img_w_pt),
+                                    lopdf::Object::Real(0.0),
+                                    lopdf::Object::Real(0.0),
+                                    lopdf::Object::Real(img_h_pt),
+                                    lopdf::Object::Real(x_pt),
+                                    lopdf::Object::Real(y_pt),
+                                ]});
+                                wm_ops.push(Operation { operator: "Do".into(), operands: vec![
+                                    lopdf::Object::Name(name.clone().into_bytes()),
+                                ]});
+                                wm_ops.push(Operation { operator: "Q".into(), operands: vec![] });
+
+                                let wm_content = lopdf::content::Content { operations: wm_ops };
+                                if let Ok(wm_bytes) = wm_content.encode() {
+                                    if !content_bytes.is_empty() {
+                                        content_bytes.push(b'\n');
+                                    }
+                                    content_bytes.extend_from_slice(&wm_bytes);
+                                    xobj_names.push((name.into_bytes(), wm_xobj_id));
+                                }
+                            }
+                            log::info!("lopdf hybrid: page {} watermark added", page_idx);
+                        }
+                        Err(e) => {
+                            log::warn!("lopdf hybrid: page {} watermark decode failed: {}", page_idx, e);
+                        }
+                    }
+                }
+            }
+        }
+
         // Add cut lines if enabled
         if request.settings.cutline {
             // Calculate footer cut line position
@@ -4874,6 +5269,21 @@ fn generate_pdf_passthrough(
                     log::info!("lopdf hybrid: page {} cut lines added", page_idx);
                 } else {
                     log::warn!("lopdf hybrid: page {} cut line encode failed", page_idx);
+                }
+            }
+        }
+
+        // Add slot borders if enabled
+        if request.settings.border {
+            if let Some(border_ops) = build_border_ops_lopdf(&slot_positions) {
+                if !content_bytes.is_empty() {
+                    content_bytes.push(b'\n');
+                }
+                if let Ok(border_bytes) = border_ops.encode() {
+                    content_bytes.extend_from_slice(&border_bytes);
+                    log::info!("lopdf hybrid: page {} borders added", page_idx);
+                } else {
+                    log::warn!("lopdf hybrid: page {} border encode failed", page_idx);
                 }
             }
         }
@@ -5084,6 +5494,63 @@ fn build_cutline_ops_lopdf(
     }
 
     // Restore graphics state
+    ops.push(Operation { operator: "Q".into(), operands: vec![] });
+
+    Some(lopdf::content::Content { operations: ops })
+}
+
+/// Draw borders around each slot (solid lines).
+fn build_border_ops_lopdf(
+    slot_positions: &[LayoutSlotMm],
+) -> Option<lopdf::content::Content> {
+    use lopdf::content::Operation;
+
+    if slot_positions.is_empty() {
+        return None;
+    }
+
+    let mut ops = Vec::new();
+
+    ops.push(Operation { operator: "q".into(), operands: vec![] });
+
+    ops.push(Operation { operator: "w".into(), operands: vec![lopdf::Object::Real(1.0)] });
+
+    ops.push(Operation { operator: "d".into(), operands: vec![
+        lopdf::Object::Array(vec![
+            lopdf::Object::Integer(1),
+            lopdf::Object::Integer(0),
+        ]),
+        lopdf::Object::Integer(0),
+    ]});
+
+    ops.push(Operation { operator: "G".into(), operands: vec![lopdf::Object::Real(0.0)] });
+
+    for slot in slot_positions {
+        let x1 = slot.x_mm * MM_TO_PT;
+        let y1 = slot.y_mm * MM_TO_PT;
+        let x2 = (slot.x_mm + slot.w_mm) * MM_TO_PT;
+        let y2 = (slot.y_mm + slot.h_mm) * MM_TO_PT;
+
+        ops.push(Operation { operator: "m".into(), operands: vec![
+            lopdf::Object::Real(x1),
+            lopdf::Object::Real(y1),
+        ]});
+        ops.push(Operation { operator: "l".into(), operands: vec![
+            lopdf::Object::Real(x2),
+            lopdf::Object::Real(y1),
+        ]});
+        ops.push(Operation { operator: "l".into(), operands: vec![
+            lopdf::Object::Real(x2),
+            lopdf::Object::Real(y2),
+        ]});
+        ops.push(Operation { operator: "l".into(), operands: vec![
+            lopdf::Object::Real(x1),
+            lopdf::Object::Real(y2),
+        ]});
+        ops.push(Operation { operator: "h".into(), operands: vec![] });
+        ops.push(Operation { operator: "S".into(), operands: vec![] });
+    }
+
     ops.push(Operation { operator: "Q".into(), operands: vec![] });
 
     Some(lopdf::content::Content { operations: ops })

@@ -138,7 +138,7 @@ function renderPage(pageFiles, pi, total, s) {
       if (s.fitMode === 'fill') fit = 'cover';
       else if (s.fitMode === 'original') fit = 'none';
       else if (s.fitMode === 'custom') fit = 'contain';
-      var bdr = s.border ? 'box-shadow:inset 0 0 0 1px #000;' : 'box-shadow:inset 0 0 0 0.5px rgba(0,0,0,0.1);';
+      var bdr = s.border ? 'outline:1px solid #000;outline-offset:-1px;' : '';
       var transforms = '';
       // Apply per-slot scale first (before fit-mode custom scale and rotation)
       if (perScale !== 1) transforms += 'scale(' + perScale + ') ';
@@ -164,7 +164,7 @@ function renderPage(pageFiles, pi, total, s) {
       inner = '<img src="' + src + '" style="' + sizeStyle + 'object-fit:' + fit + ';' + filt + (transforms ? 'transform:' + transforms + ';' : '') + '">';
       if (s.number) inner += '<div class="slot-num">' + (pi * s.rows * s.cols + i + 1) + '</div>';
       if (s.watermark && s.watermarkText) {
-        var ws = Math.min(slot.w * scale, slot.h * scale) * 0.15;
+        var ws = s.watermarkSize * MM2PX * scale;
         inner += '<div class="watermark" style="color:' + s.watermarkColor + ';opacity:' + s.watermarkOpacity + ';font-size:' + ws + 'px;transform:translate(-50%,-50%) rotate(' + s.watermarkAngle + 'deg);top:50%;left:50%">' + s.watermarkText + '</div>';
       }
       // Resize handles (visible only when selected)
