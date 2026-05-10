@@ -145,7 +145,12 @@
         <div class="sec">
           <div class="sec-title">🖨 打印机</div>
           <div class="row"><label class="lbl">选择</label><div class="ctrl"><select id="printerSel"><option value="">默认打印机</option></select></div></div>
-          <button class="btn btn-sm" style="width:100%" onclick="refreshPrinters()">🔄 刷新打印机列表</button>
+          <div style="margin-top: 8px;">
+            <button class="btn btn-sm" style="width:100%" onclick="refreshPrinters()">🔄 刷新打印机列表</button>
+          </div>
+          <div style="margin-top: 12px;"></div>
+          <div class="row"><label class="lbl">打印模式</label><div class="ctrl"><select id="printMode" onchange="try{localStorage.setItem('fapiao-print-mode',this.value)}catch(e){}"><option value="dialog">打开PDF</option><option value="direct">静默打印</option></select></div></div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">打开PDF：在PDF阅读器中打开，您可手动选择打印设置；静默模式：直接发送到打印机，无弹窗。</div>
         </div>
         <div class="sec">
           <div class="sec-title">🔢 份数设置</div>
@@ -168,7 +173,6 @@
           </div>
           <div id="customFMRow" class="trow" style="display:none"><label class="tlbl">自定义下边距</label><button class="tgl" id="toggleCustomFM" onclick="toggleFeature('customFM',this)"></button></div>
           <div id="footerMarginRow" class="row" style="display:none;margin-top:4px"><label class="lbl">下边距</label><div class="rr ctrl"><input type="range" id="footerMargin" min="0" max="30" value="8" oninput="syncSlider(this,'footerMarginN');updatePreview()"><input type="number" id="footerMarginN" min="0" max="30" value="8" style="width:64px" onchange="syncRange(this,'footerMargin');updatePreview()"></div></div>
-          <div class="trow"><label class="tlbl">打印前确认</label><button class="tgl on" id="toggleConfirm" onclick="toggleFeature('confirmPrint',this)"></button></div>
         </div>
       </div>
       <div class="sidebar-panel-footer">
@@ -206,11 +210,7 @@
           <div class="trow"><label class="tlbl">保存后自动打开</label><button class="tgl on" id="toggleAutoOpenPdf" onclick="togglePref('autoOpenPdf',this)"></button></div>
           <div class="row" style="margin-top:8px"><label class="lbl">保存目录</label><div class="ctrl" style="display:flex;gap:4px;align-items:center"><input type="text" id="saveDir" readonly placeholder="未设置，每次手动选择" style="flex:1;font-size:12px;cursor:default;padding:5px 8px" onclick="pickSaveDir()"><button class="btn btn-sm btn-icon" onclick="pickSaveDir()" title="选择目录">📂</button><button class="btn btn-sm btn-icon" onclick="clearSaveDir()" title="清除目录">✕</button></div></div>
         </div>
-        <div class="sec">
-          <div class="sec-title">🖨 打印设置</div>
-          <div class="row"><label class="lbl">打印模式</label><div class="ctrl"><select id="printMode" onchange="try{localStorage.setItem('fapiao-print-mode',this.value)}catch(e){}"><option value="dialog">弹出打印对话框</option><option value="direct">静默打印</option></select></div></div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.4">对话框模式：打开PDF阅读器的打印界面；静默模式：直接发送到默认打印机，无弹窗。</div>
-        </div>
+
         <div class="sec">
           <div class="sec-title">💰 金额统计</div>
           <div class="row"><label class="lbl">统计模式</label><div class="ctrl"><select id="amtMode" onchange="S.amtMode=this.value;try{localStorage.setItem('fapiao-amt-mode',this.value)}catch(e){};updateAmountSummary()"><option value="tax">含税总价</option><option value="notax">不含税金额</option><option value="both">同时显示</option></select></div></div>

@@ -260,8 +260,9 @@ async fn generate_pdf_from_layout(
             // Direct print: use "printto" verb + SW_HIDE to print silently
             shell_execute_print(&output_for_print, printer_name.as_deref())?;
         } else {
-            // Dialog mode: use "print" verb + SW_SHOWNORMAL to show print dialog
-            shell_execute("print", &output_for_print.to_string_lossy())?;
+            // Dialog mode: open the PDF file first, let user decide what to do
+            // This avoids the "flash and print immediately" issue with some PDF readers
+            shell_execute("open", &output_for_print.to_string_lossy())?;
         }
     }
 
@@ -305,8 +306,9 @@ fn print_pdf_file(
             // Direct print: use "printto" verb + SW_HIDE to print silently
             shell_execute_print(output, printer_name.as_deref())?;
         } else {
-            // Dialog mode: use "print" verb + SW_SHOWNORMAL to show print dialog
-            shell_execute("print", &output.to_string_lossy())?;
+            // Dialog mode: open the PDF file first, let user decide what to do
+            // This avoids the "flash and print immediately" issue with some PDF readers
+            shell_execute("open", &output.to_string_lossy())?;
         }
     }
 
@@ -317,7 +319,7 @@ fn print_pdf_file(
             "已直接打印 → 默认打印机".to_string()
         }
     } else {
-        "已弹出打印对话框".to_string()
+        "已打开PDF，请在阅读器中选择打印".to_string()
     };
 
     Ok(pdf_engine::PdfResult {
@@ -386,9 +388,10 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
         }
     }
 
-    // Fallback: ShellExecuteW "printto" + SW_HIDE
+    // Fallback 1: ShellExecuteW "printto" + SW_HIDE with printer
+    log::info!("Falling back to ShellExecute printto");
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
 
     let _com = ComGuard::init();
     unsafe {
@@ -405,11 +408,31 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
             PCWSTR::null(),
             SW_HIDE,
         );
-        if ret.0 as isize <= 32 {
-            return Err(format!("打印失败，错误码: {}。请确认已安装PDF阅读器且关联了打印功能。", ret.0 as isize));
+        if ret.0 as isize > 32 {
+            return Ok(());
         }
+        log::warn!("ShellExecute printto failed (code: {}), trying simple print", ret.0 as isize);
+
+        // Fallback 2: ShellExecuteW "print" without specifying printer
+        let verb: HSTRING = "print".into();
+        let ret = ShellExecuteW(
+            None,
+            &verb,
+            &file,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW, // Show the dialog so user can manually select printer if needed
+        );
+        if ret.0 as isize > 32 {
+            return Ok(());
+        }
+
+        // If all fallbacks fail, return a helpful error
+        return Err(format!(
+            "打印失败，错误码: {}。请尝试以下解决方法：\n1. 安装PDF阅读器（如Adobe Reader）\n2. 检查打印机是否正常连接\n3. 在打印面板中选择\"弹出对话框\"模式",
+            ret.0 as isize
+        ));
     }
-    Ok(())
 }
 
 /// RAII wrapper for printer handle — ensures ClosePrinter is called on drop.

@@ -34,7 +34,7 @@ var S = {
   feat: {
     cutline: true, number: false, border: false, trimWhite: false,
     watermark: false, collate: true, duplex: false, pageNum: false,
-    printDate: false, footer: false, confirmPrint: true,
+    printDate: false, footer: false,
     autoOpenPdf: true,
     ocrEnabled: false,
     pdfTextEnabled: false,  // PDF文字层提取（默认关闭以提高加载速度）
@@ -1766,7 +1766,7 @@ function exportSettings() {
 function resetSettings() {
   if (!confirm('确认恢复所有默认设置？')) return;
   S.layout = { cols: 1, rows: 1 };
-  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, confirmPrint: true, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true };
+  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true };
   S.ocrPrecision = 'standard';
   S.viewZoom = 0;
   document.getElementById('paperSize').value = 'A4';
@@ -1797,7 +1797,6 @@ function resetSettings() {
   document.getElementById('toggleDuplex').classList.remove('on');
   document.getElementById('togglePageNum').classList.remove('on');
   document.getElementById('toggleDate').classList.remove('on');
-  document.getElementById('toggleConfirm').classList.add('on');
   document.getElementById('toggleAutoOpenPdf').classList.add('on');
   document.getElementById('toggleOcrEnabled').classList.remove('on');
   document.getElementById('togglePdfText').classList.remove('on');
