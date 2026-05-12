@@ -18,6 +18,7 @@
 - **非税发票金额异常（中文大写金额误解析）**：`parseChineseNumeral` 将非税票据的"柒万圆整"等解析为超大金额。修复：`_isNonTax=true` 时 `amountNoTax` 强制等于 `amountTax`，忽略中文大写金额解析结果
 - **0% 税率发票税额错误**：税额为 0 时 OCR/文字提取可能返回异常值。多处加守卫：`extractByCoordinates` 中税额为 0 时跳过坐标提取、`_extractAmountsByText` 中 `amountTax - amountNoTax != taxAmount` 时重置 `taxAmount = 0`、`_applyOcrTextResult` 中 `taxAmount > amountTax` 时重置
 - **话费发票金额异常**："价税合计（大写）柒万圆整（小写）¥70000.00" 格式导致金额提取取到极大值。修复：`_extractAmountsByText` 中 Pattern1c 允许中文大写字符、`_chineseNumeralToNumber` 兜底返回 0 而非 NaN
+- **虚拟打印机（Microsoft Print to PDF 等）无法使用**：SumatraPDF 的 `-silent` 参数会阻止虚拟打印机的保存对话框弹出，导致无法选择保存位置。修复：检测虚拟打印机（Print to PDF / Microsoft Print to PDF / OneNote / Fax），对其不使用 `-silent` 参数，让用户可以正常交互
 
 ### 🔧 优化
 

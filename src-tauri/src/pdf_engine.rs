@@ -1201,9 +1201,17 @@ pub fn print_with_sumatrapdf(
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    let is_virtual_printer = printer_name.to_lowercase().contains("print to pdf")
+        || printer_name.to_lowercase().contains("microsoft print to pdf")
+        || printer_name.to_lowercase().contains("onenote")
+        || printer_name.to_lowercase().contains("fax");
+
     let mut cmd = Command::new(sumatra_path);
     cmd.arg("-print-to").arg(printer_name);
-    cmd.arg("-silent");
+
+    if !is_virtual_printer {
+        cmd.arg("-silent");
+    }
 
     if !settings_str.is_empty() {
         cmd.arg("-print-settings").arg(settings_str);
@@ -1216,9 +1224,10 @@ pub fn print_with_sumatrapdf(
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
     log::info!(
-        "SumatraPDF print: {:?} -print-to {} -silent {} {}",
+        "SumatraPDF print: {:?} -print-to {} {} {} {}",
         sumatra_path,
         printer_name,
+        if is_virtual_printer { "" } else { "-silent" },
         if settings_str.is_empty() { "" } else { "-print-settings" },
         settings_str
     );
