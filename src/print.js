@@ -52,12 +52,10 @@ function buildLayoutRequest(files, settings) {
     return fileMap[key];
   }
 
-  // 2. Build expanded pages (with colate/copies handling)
+  // 2. Build pages (per-file copies already expanded in getActiveFiles,
+  // global copies handled by SumatraPDF -print-settings Nx, not expanded here)
   var pages = buildPages(files, settings);
-  var copies = settings.copies || 1;
-  var expanded = settings.collate
-    ? Array(copies).fill(pages).flat()
-    : pages.flatMap(function(p) { return Array(copies).fill(p); });
+  var expanded = pages;
 
   // 3. Build page specs with effective rotation
   var pageSpecs = [];
@@ -135,31 +133,194 @@ async function listenPdfProgress() {
 }
 
 /**
- * Print invoices — Rust does layout + PDF generation.
- * If PDF hasn't changed since last save/print, reuse it directly.
+ * Print invoices — three independent paths:
+ * - Confirm mode: custom dialog → SumatraPDF silent print
+ * - Direct/silent mode: SumatraPDF silent print directly
+ * - PDF reader mode: generate PDF → auto-print via default reader (uses PDF cache)
  */
 async function doPrint() {
   var files = getActiveFiles();
   if (!files.length) { toast('请先添加发票！'); return; }
   var s = getSettings();
   var printMode = document.getElementById('printMode').value;
-  var isDirect = printMode === 'direct';
 
-  // Cache hit: PDF unchanged since last generation, reuse directly
+  if (printMode === 'confirm') {
+    showPrintConfirm(files, s);
+  } else if (printMode === 'pdf') {
+    await doPdfReaderPrint(files, s);
+  } else {
+    await doSumatraPrint(files, s);
+  }
+}
+
+function showPrintConfirm(files, s) {
+  var printerName = s.printerName || '默认打印机';
+  var layout = S.layout.rows + '\u00D7' + S.layout.cols;
+  var ps = document.getElementById('paperSize').value;
+  var orient = document.getElementById('orientation').value === 'portrait' ? '纵向' : '横向';
+  var paper = ps === 'custom' ? (s.paperW + '\u00D7' + s.paperH + 'mm') : ps.toUpperCase();
+  var copies = s.copies || 1;
+  var colorMode = document.getElementById('colorMode').value;
+  var colorLabel = colorMode === 'color' ? '彩色' : colorMode === 'grayscale' ? '灰度' : '黑白';
+  var activeCount = files.length;
+
+  var pages = buildPages(files, s);
+  var totalPages = pages.length;
+
+  var fitLabel = s.fitMode === 'contain' ? '适应' : s.fitMode === 'cover' ? '填充' : (Math.round(s.customScale * 100) + '%');
+  var rotLabel = s.globalRotation === 'auto' ? '自动' : s.globalRotation + '\u00B0';
+  var duplexLabel = s.duplex ? '是' : '否';
+  var cutlineLabel = s.cutline ? '是' : '否';
+
+  var row = function(lbl, val, cls) {
+    return '<div class="modal-row' + (cls ? ' ' + cls : '') + '"><span class="modal-lbl">' + lbl + '</span><span class="modal-val">' + val + '</span></div>';
+  };
+
+  var html = row('打印机', escHtml(printerName))
+    + row('发票', activeCount + ' 张')
+    + row('布局', layout)
+    + row('纸张', paper + ' ' + orient)
+    + row('边距', s.marginTop + '/' + s.marginBottom + '/' + s.marginLeft + '/' + s.marginRight + 'mm')
+    + row('间距', s.gapH + '/' + s.gapV + 'mm')
+    + row('缩放', fitLabel)
+    + row('旋转', rotLabel)
+    + row('份数', copies)
+    + row('颜色', colorLabel)
+    + row('双面', duplexLabel)
+    + row('切割线', cutlineLabel)
+    + '<div class="modal-sep"></div>'
+    + row('最终页数', totalPages + ' 页', 'highlight');
+
+  document.getElementById('printConfirmBody').innerHTML = html;
+  document.getElementById('printConfirmModal').classList.remove('hidden');
+}
+
+function closePrintConfirm() {
+  document.getElementById('printConfirmModal').classList.add('hidden');
+}
+
+async function confirmPrint() {
+  closePrintConfirm();
+  var files = getActiveFiles();
+  var s = getSettings();
+  await doSumatraPrint(files, s);
+}
+
+async function doSumatraPrint(files, s) {
+  if (isTauri && invoke) {
+    try {
+      var available = await invoke('check_sumatrapdf_available');
+      if (!available) {
+        showSumatraPdfMissing();
+        return;
+      }
+    } catch(e) {
+      console.warn('check_sumatrapdf_available failed:', e);
+    }
+  }
+
+  if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
+    try {
+      var result = await invoke('sumatrapdf_print', {
+        pdfPath: _lastPdfPath,
+        printerName: s.printerName || null,
+        copies: s.copies,
+        duplex: s.duplex,
+        colorMode: document.getElementById('colorMode').value,
+        fitMode: s.fitMode,
+        paperW: s.paperW,
+        paperH: s.paperH
+      });
+      if (result.success) {
+        toast('\uD83D\uDCA8 ' + result.message);
+        return;
+      }
+    } catch(e) {
+      console.warn('Cached sumatrapdf print failed:', e);
+    }
+  }
+
+  showLoading('正在准备打印...');
+  var unlisten = await listenPdfProgress();
+  try {
+    var layoutReq = buildLayoutRequest(files, s);
+    if (isTauri && invoke) {
+      document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
+      var tempDir = await invoke('get_temp_dir');
+      var outputPath = tempDir + '\\fapiao_print_output.pdf';
+      var result = await invoke('generate_pdf_from_layout', {
+        request: layoutReq,
+        outputPath: outputPath,
+        directPrint: true,
+        printerName: s.printerName || null,
+        printAfter: true
+      });
+      if (unlisten) unlisten();
+      hideLoading();
+      if (result.success) {
+        _lastPdfPath = result.pdfPath;
+        _pdfDirty = false;
+        toast('\uD83D\uDCA8 ' + result.message);
+      } else {
+        toast('打印失败：' + result.message);
+      }
+    } else {
+      if (unlisten) unlisten();
+      hideLoading();
+      fallbackPrint(files, s);
+    }
+  } catch (err) {
+    if (unlisten) unlisten();
+    hideLoading();
+    console.error('SumatraPDF print error:', err);
+    toast('打印出错：' + String(err));
+  }
+}
+
+async function doXpsPrint(files, s) {
+  showLoading('正在准备打印...');
+  var unlisten = await listenPdfProgress();
+  try {
+    var layoutReq = buildLayoutRequest(files, s);
+    if (isTauri && invoke) {
+      document.getElementById('loadingText').textContent = '正在发送到打印机...';
+      var result = await invoke('xps_print', {
+        request: layoutReq,
+        printerName: s.printerName || null
+      });
+      if (unlisten) unlisten();
+      hideLoading();
+      if (result.success) {
+        toast('\uD83D\uDCA8 ' + result.message);
+      } else {
+        toast('打印失败：' + result.message);
+      }
+    } else {
+      if (unlisten) unlisten();
+      hideLoading();
+      fallbackPrint(files, s);
+    }
+  } catch (err) {
+    if (unlisten) unlisten();
+    hideLoading();
+    console.error('XPS print error:', err);
+    toast('打印出错：' + String(err));
+  }
+}
+
+async function doPdfReaderPrint(files, s) {
   if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
     try {
       var cacheResult = await invoke('print_pdf_file', {
         pdfPath: _lastPdfPath,
-        directPrint: isDirect,
+        directPrint: true,
         printerName: s.printerName || null
       });
       if (cacheResult.success) {
         toast('\uD83D\uDCC4 ' + cacheResult.message);
         return;
       }
-      // If cache result is not success, fall through to regeneration
     } catch(e) {
-      // Cached PDF may have been deleted — fall through to regeneration
       console.warn('Cached PDF reuse failed, regenerating:', e);
     }
   }
@@ -171,13 +332,12 @@ async function doPrint() {
 
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
-      // Get system temp directory instead of hardcoded path
       var tempDir = await invoke('get_temp_dir');
       var outputPath = tempDir + '\\fapiao_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
         outputPath: outputPath,
-        directPrint: isDirect,
+        directPrint: true,
         printerName: s.printerName || null
       });
       if (unlisten) unlisten();
@@ -185,7 +345,7 @@ async function doPrint() {
       if (result.success) {
         _lastPdfPath = result.pdfPath;
         _pdfDirty = false;
-        toast('\uD83D\uDCA8 ' + result.message);
+        toast('\uD83D\uDCC4 ' + result.message);
       } else {
         toast('打印失败：' + result.message);
       }

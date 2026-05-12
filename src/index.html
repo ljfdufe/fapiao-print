@@ -97,6 +97,7 @@
           <div class="sec-title">🔍 缩放模式</div>
           <div class="row"><label class="lbl">模式</label><div class="ctrl"><select id="fitMode" onchange="onFitChange()"><option value="fit">自适应</option><option value="fill">拉伸填充</option><option value="original">原始大小</option><option value="custom">自定义 %</option></select></div></div>
           <div id="customScaleRow" class="row" style="display:none"><label class="lbl">%</label><div class="rr ctrl"><input type="range" id="customScale" min="20" max="200" value="100" oninput="syncSlider(this,'customScaleN');updatePreview()"><input type="number" id="customScaleN" min="20" max="200" value="100" style="width:48px" onchange="syncRange(this,'customScale');updatePreview()"></div></div>
+          <div id="customScaleHint" class="row hint" style="display:none;font-size:11px;color:#6b7280;padding:2px 0 2px 70px">提示：自定义缩放模式下，可通过右侧「单票调整」面板微调偏移位置</div>
         </div>
         <div class="sec">
           <div class="sec-title">🖼 旋转</div>
@@ -149,8 +150,8 @@
             <button class="btn btn-sm" style="width:100%" onclick="refreshPrinters()">🔄 刷新打印机列表</button>
           </div>
           <div style="margin-top: 12px;"></div>
-          <div class="row"><label class="lbl">打印模式</label><div class="ctrl"><select id="printMode" onchange="try{localStorage.setItem('fapiao-print-mode',this.value)}catch(e){}"><option value="dialog">打开PDF</option><option value="direct">静默打印</option></select></div></div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">打开PDF：在PDF阅读器中打开，您可手动选择打印设置；静默模式：直接发送到打印机，无弹窗。</div>
+          <div class="row"><label class="lbl">打印模式</label><div class="ctrl"><select id="printMode" onchange="try{localStorage.setItem('fapiao-print-mode',this.value)}catch(e){}"><option value="confirm">弹窗确认</option><option value="direct">静默打印</option><option value="pdf">PDF阅读器</option></select></div></div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">弹窗确认：确认后静默打印；静默打印：无弹窗直接打印（需SumatraPDF）；PDF阅读器：通过默认阅读器自动打印。</div>
         </div>
         <div class="sec">
           <div class="sec-title">🔢 份数设置</div>
@@ -305,6 +306,9 @@
 
 <!-- Invoice options modal -->
 <div class="modal-bg hidden" id="invModal" onclick="closeInvModal()"><div class="modal" onclick="event.stopPropagation()"><div class="modal-title">📝 发票选项</div><div class="modal-body" id="invModalBody"></div><div class="modal-actions"><button class="btn" onclick="closeInvModal()">取消</button><button class="btn btn-primary" onclick="confirmInvModal()">确认</button></div></div></div>
+
+<!-- Print confirm modal -->
+<div class="modal-bg hidden" id="printConfirmModal" onclick="closePrintConfirm()"><div class="modal print-confirm-modal" onclick="event.stopPropagation()"><div class="modal-title">🖨 确认打印</div><div class="modal-body" id="printConfirmBody"></div><div class="modal-actions"><button class="btn" onclick="closePrintConfirm()">取消</button><button class="btn btn-success" id="printConfirmBtn" onclick="confirmPrint()">确认打印</button></div></div></div>
 
 <!-- Scripts — loaded in order: OCR → Layout → Print → App -->
 <script src="ocr.js"></script>

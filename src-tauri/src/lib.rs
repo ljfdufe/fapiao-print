@@ -1,6 +1,71 @@
 use tauri::{command, Emitter};
 
 mod pdf_engine;
+
+#[cfg(target_os = "windows")]
+fn check_windows_version() -> Result<(), String> {
+    use windows::core::*;
+    use windows::Win32::System::Registry::*;
+    
+    unsafe {
+        let mut hkey = HKEY::default();
+        let result = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        
+        if result.is_ok() {
+            let mut build_number = [0u16; 256];
+            let mut build_number_size = (build_number.len() * 2) as u32;
+            
+            let result = RegQueryValueExW(
+                hkey,
+                w!("CurrentBuildNumber"),
+                None,
+                None,
+                Some(build_number.as_mut_ptr() as *mut u8),
+                Some(&mut build_number_size),
+            );
+            
+            let _ = RegCloseKey(hkey);
+            
+            if result.is_ok() {
+                let build_str = String::from_utf16_lossy(&build_number[..(build_number_size as usize / 2)]);
+                let build_str = build_str.trim_end_matches('\0');
+                
+                if let Ok(build) = build_str.parse::<u32>() {
+                    if build < 17134 {
+                        return Err(format!(
+                            "您的系统版本不支持本应用。\n\n当前系统：Windows (Build {})\n\n需要：Windows 10 1803 (Build 17134) 或 Windows 11",
+                            build
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_error_dialog(message: &str) {
+    use windows::core::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from("电子发票打印工具 - 系统不兼容"),
+            MB_ICONERROR | MB_OK,
+        );
+    }
+}
 use pdf_engine::{PrinterInfo, FileData, RenderedPage, ComGuard, LayoutRenderRequest, PdfTextResult};
 #[cfg(feature = "ocr")]
 use pdf_engine::{OcrResult, RenderedOcrPage};
@@ -243,6 +308,14 @@ async fn generate_pdf_from_layout(
     });
 
     let output_for_print = output.clone();
+    let print_settings = (
+        request.settings.copies,
+        request.settings.duplex,
+        request.settings.color_mode.clone(),
+        request.settings.fit_mode.clone(),
+        request.settings.paper_w,
+        request.settings.paper_h,
+    );
     let request = request;
     tauri::async_runtime::spawn_blocking(move || {
         pdf_engine::generate_pdf_from_layout(&request, &output, Some(progress_cb))
@@ -257,11 +330,27 @@ async fn generate_pdf_from_layout(
     #[cfg(target_os = "windows")]
     if should_print {
         if is_direct {
-            // Direct print: use "printto" verb + SW_HIDE to print silently
-            shell_execute_print(&output_for_print, printer_name.as_deref())?;
+            let resolved_printer = match &printer_name {
+                Some(name) if !name.is_empty() => name.clone(),
+                _ => pdf_engine::get_default_printer_name()
+                    .ok_or("未找到默认打印机".to_string())?,
+            };
+            if let Some(sumatra) = pdf_engine::find_sumatrapdf() {
+                let settings_str = pdf_engine::build_sumatra_print_settings(
+                    print_settings.0,
+                    print_settings.1,
+                    &print_settings.2,
+                    &print_settings.3,
+                    Some(print_settings.4),
+                    Some(print_settings.5),
+                );
+                pdf_engine::print_with_sumatrapdf(
+                    &sumatra.path, &output_for_print, &resolved_printer, &settings_str,
+                )?;
+            } else {
+                shell_execute_print(&output_for_print, printer_name.as_deref())?;
+            }
         } else {
-            // Dialog mode: open the PDF file first, let user decide what to do
-            // This avoids the "flash and print immediately" issue with some PDF readers
             shell_execute("open", &output_for_print.to_string_lossy())?;
         }
     }
@@ -282,6 +371,7 @@ async fn generate_pdf_from_layout(
         success: true,
         message: msg,
         pdf_path: Some(output_for_print.to_string_lossy().to_string()),
+        warnings: None,
     })
 }
 
@@ -326,7 +416,228 @@ fn print_pdf_file(
         success: true,
         message: msg,
         pdf_path: Some(output.to_string_lossy().to_string()),
+        warnings: None,
     })
+}
+
+/// Check if SumatraPDF is available on the system
+#[command]
+fn check_sumatrapdf_available() -> bool {
+    pdf_engine::find_sumatrapdf().is_some()
+}
+
+/// Download SumatraPDF portable (ZIP) to the app's tools directory
+#[command]
+async fn download_sumatrapdf(app: tauri::AppHandle) -> Result<pdf_engine::PdfResult, String> {
+    let tools_dir = std::env::current_exe()
+        .map_err(|e| format!("无法获取应用路径: {}", e))?
+        .parent()
+        .ok_or("无法获取应用目录")?
+        .join("tools");
+
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| format!("创建目录失败: {}", e))?;
+
+    let dest = tools_dir.join("SumatraPDF.exe");
+
+    if dest.exists() {
+        return Ok(pdf_engine::PdfResult {
+            success: true,
+            message: "SumatraPDF 已存在".to_string(),
+            pdf_path: Some(dest.to_string_lossy().to_string()),
+            warnings: None,
+        });
+    }
+
+    let zip_url = "https://www.sumatrapdfreader.org/dl/rel/3.6.1/SumatraPDF-3.6.1-64.zip";
+    let zip_path = tools_dir.join("SumatraPDF-3.6.1-64.zip");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {}", e))?;
+
+    {
+        let mut file = std::fs::File::create(&zip_path)
+            .map_err(|e| format!("创建临时文件失败: {}", e))?;
+        let mut stream = client.get(zip_url)
+            .send()
+            .await
+            .map_err(|e| format!("下载失败: {}", e))?;
+
+        if !stream.status().is_success() {
+            std::fs::remove_file(&zip_path).ok();
+            return Err(format!("下载失败，HTTP 状态: {}", stream.status()));
+        }
+
+        let total_size = stream.content_length().unwrap_or(0);
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk) = stream.chunk().await.map_err(|e| format!("下载出错: {}", e))? {
+            use std::io::Write;
+            file.write_all(&chunk)
+                .map_err(|e| format!("写入文件失败: {}", e))?;
+            downloaded += chunk.len() as u64;
+            let _ = app.emit("sumatra-download-progress", serde_json::json!({
+                "current": downloaded,
+                "total": total_size,
+                "percent": if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 }
+            }));
+        }
+    }
+
+    let zip_file = std::fs::File::open(&zip_path)
+        .map_err(|e| format!("打开 ZIP 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(zip_file)
+        .map_err(|e| format!("解析 ZIP 失败: {}", e))?;
+
+    let mut found_exe = false;
+    let mut zip_entries: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("读取 ZIP 条目失败: {}", e))?;
+        let name = file.name().to_string();
+        zip_entries.push(name.clone());
+
+        let file_name = std::path::Path::new(&name)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !file.is_dir()
+            && file_name.to_lowercase().contains("sumatrapdf")
+            && file_name.to_lowercase().ends_with(".exe")
+        {
+            let mut out_file = std::fs::File::create(&dest)
+                .map_err(|e| format!("创建 SumatraPDF.exe 失败: {}", e))?;
+            std::io::copy(&mut file, &mut out_file)
+                .map_err(|e| format!("解压失败: {}", e))?;
+            found_exe = true;
+            break;
+        }
+    }
+
+    std::fs::remove_file(&zip_path).ok();
+
+    if !found_exe {
+        log::warn!("ZIP entries: {:?}", zip_entries);
+        return Err(format!("ZIP 中未找到 SumatraPDF.exe，包含文件: {}", zip_entries.join(", ")));
+    }
+
+    log::info!("SumatraPDF downloaded to: {}", dest.display());
+
+    Ok(pdf_engine::PdfResult {
+        success: true,
+        message: format!("SumatraPDF 已下载到: {}", dest.display()),
+        pdf_path: Some(dest.to_string_lossy().to_string()),
+        warnings: None,
+    })
+}
+
+/// Print an existing PDF file using SumatraPDF CLI
+#[command]
+fn sumatrapdf_print(
+    pdf_path: String,
+    printer_name: Option<String>,
+    copies: Option<u32>,
+    duplex: Option<bool>,
+    color_mode: Option<String>,
+    fit_mode: Option<String>,
+    paper_w: Option<f32>,
+    paper_h: Option<f32>,
+) -> Result<pdf_engine::PdfResult, String> {
+    let output = std::path::Path::new(&pdf_path);
+    if !output.exists() {
+        return Err("PDF文件不存在".to_string());
+    }
+
+    let sumatra = pdf_engine::find_sumatrapdf()
+        .ok_or("未检测到 SumatraPDF。请安装 SumatraPDF 或切换到「PDF阅读器」模式。".to_string())?;
+
+    let resolved_printer = match printer_name {
+        Some(name) if !name.is_empty() => name,
+        _ => pdf_engine::get_default_printer_name()
+            .ok_or("未找到默认打印机".to_string())?,
+    };
+
+    let settings_str = pdf_engine::build_sumatra_print_settings(
+        copies.unwrap_or(1),
+        duplex.unwrap_or(false),
+        &color_mode.unwrap_or_default(),
+        &fit_mode.unwrap_or_default(),
+        paper_w,
+        paper_h,
+    );
+
+    pdf_engine::print_with_sumatrapdf(&sumatra.path, output, &resolved_printer, &settings_str)?;
+
+    Ok(pdf_engine::PdfResult {
+        success: true,
+        message: format!("已发送到打印机「{}」", resolved_printer),
+        pdf_path: Some(pdf_path),
+        warnings: None,
+    })
+}
+
+/// XPS direct print — builds XPS in memory and sends to printer via StartXpsPrintJob.
+/// No PDF file is generated. Used for silent/direct printing mode.
+#[cfg(target_os = "windows")]
+#[command]
+async fn xps_print(
+    app: tauri::AppHandle,
+    request: LayoutRenderRequest,
+    printer_name: Option<String>,
+) -> Result<pdf_engine::PdfResult, String> {
+    use std::sync::atomic::Ordering;
+
+    if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("应用正在关闭".to_string());
+    }
+
+    let resolved_printer = match printer_name {
+        Some(name) if !name.is_empty() => name,
+        _ => pdf_engine::get_default_printer_name()
+            .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?,
+    };
+
+    let app_handle = app.clone();
+    let progress_cb: pdf_engine::ProgressFn = Box::new(move |phase, current, total| {
+        let _ = app_handle.emit("pdf-progress", serde_json::json!({
+            "phase": phase,
+            "current": current,
+            "total": total,
+        }));
+    });
+
+    let printer_for_job = resolved_printer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::xps_print(&request, &printer_for_job, Some(&progress_cb))
+    })
+    .await
+    .map_err(|e| format!("XPS打印任务失败: {}", e))?
+    .map_err(|e| format!("XPS打印失败: {}", e))?;
+
+    let msg = if resolved_printer.is_empty() {
+        "已发送到默认打印机".to_string()
+    } else {
+        format!("已发送到打印机「{}」", resolved_printer)
+    };
+
+    Ok(pdf_engine::PdfResult {
+        success: true,
+        message: msg,
+        pdf_path: None,
+        warnings: None,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[command]
+async fn xps_print(
+    _app: tauri::AppHandle,
+    _request: LayoutRenderRequest,
+    _printer_name: Option<String>,
+) -> Result<pdf_engine::PdfResult, String> {
+    Err("XPS打印仅支持Windows系统".to_string())
 }
 
 // =====================================================
@@ -359,15 +670,15 @@ fn shell_execute(verb: &str, file: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Print a PDF file silently via Windows Print Spooler API.
-/// Sends PDF bytes directly to the printer queue — no application window opens.
-/// If no printer_name is provided, automatically resolves the system default printer.
-/// Falls back to ShellExecuteW "printto" verb if the Spooler approach fails.
+/// Print a PDF file silently. Uses ShellExecute to delegate to PDF reader.
+/// Strategy 1: ShellExecuteW "printto" — specify printer, silent print
+/// Strategy 2: ShellExecuteW "print" — use default printer, may show dialog
 #[cfg(target_os = "windows")]
 fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -> Result<(), String> {
     use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
 
-    // Auto-resolve default printer if none specified
     let resolved_printer: Option<String> = match printer_name {
         Some(name) => Some(name.to_string()),
         None => pdf_engine::get_default_printer_name(),
@@ -375,26 +686,9 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
     let printer_str = resolved_printer.as_deref()
         .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?;
 
-    // Read PDF file bytes
-    let pdf_bytes = std::fs::read(pdf_path)
-        .map_err(|e| format!("读取PDF文件失败: {}", e))?;
-
-    // Try Print Spooler API first (truly silent, no window)
-    match spool_print_pdf(&pdf_bytes, printer_str) {
-        Ok(()) => return Ok(()),
-        Err(spool_err) => {
-            log::warn!("Spooler printing failed, falling back to ShellExecute: {}", spool_err);
-            // Fall through to ShellExecuteW fallback
-        }
-    }
-
-    // Fallback 1: ShellExecuteW "printto" + SW_HIDE with printer
-    log::info!("Falling back to ShellExecute printto");
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
-
     let _com = ComGuard::init();
     unsafe {
+        // Strategy 1: ShellExecuteW "printto" — specify printer, silent
         let verb: HSTRING = "printto".into();
         let file: HSTRING = pdf_path.to_string_lossy().to_string().into();
         let printer_hstring: HSTRING = printer_str.into();
@@ -413,7 +707,7 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
         }
         log::warn!("ShellExecute printto failed (code: {}), trying simple print", ret.0 as isize);
 
-        // Fallback 2: ShellExecuteW "print" without specifying printer
+        // Strategy 2: ShellExecuteW "print" without specifying printer
         let verb: HSTRING = "print".into();
         let ret = ShellExecuteW(
             None,
@@ -421,97 +715,19 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
             &file,
             PCWSTR::null(),
             PCWSTR::null(),
-            SW_SHOW, // Show the dialog so user can manually select printer if needed
+            SW_SHOW,
         );
         if ret.0 as isize > 32 {
             return Ok(());
         }
 
-        // If all fallbacks fail, return a helpful error
         return Err(format!(
-            "打印失败，错误码: {}。请尝试以下解决方法：\n1. 安装PDF阅读器（如Adobe Reader）\n2. 检查打印机是否正常连接\n3. 在打印面板中选择\"弹出对话框\"模式",
+            "打印失败，错误码: {}。请尝试以下解决方法：\n1. 检查打印机是否正常连接\n2. 在打印面板中选择\"打开PDF\"模式手动打印\n3. 安装PDF阅读器（如Adobe Reader）",
             ret.0 as isize
         ));
     }
 }
 
-/// RAII wrapper for printer handle — ensures ClosePrinter is called on drop.
-#[cfg(target_os = "windows")]
-struct PrinterHandle(windows::Win32::Foundation::HANDLE);
-#[cfg(target_os = "windows")]
-impl Drop for PrinterHandle {
-    fn drop(&mut self) {
-        use windows::Win32::Graphics::Printing::ClosePrinter;
-        if !self.0.is_invalid() {
-            unsafe { let _ = ClosePrinter(self.0); }
-        }
-    }
-}
-
-/// Send PDF bytes directly to printer via Windows Print Spooler API.
-/// No application window opens — the spooler handles everything.
-#[cfg(target_os = "windows")]
-fn spool_print_pdf(pdf_bytes: &[u8], printer_name: &str) -> Result<(), String> {
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{BOOL, HANDLE};
-    use windows::Win32::Graphics::Printing::{DOC_INFO_1W, EndDocPrinter, OpenPrinterW, StartDocPrinterW, WritePrinter};
-
-    let printer_hstring: HSTRING = printer_name.into();
-    let mut h_printer: HANDLE = HANDLE(std::ptr::null_mut());
-
-    unsafe {
-        // Open printer
-        OpenPrinterW(
-            PCWSTR::from_raw(printer_hstring.as_ptr()),
-            &mut h_printer as *mut HANDLE,
-            None,
-        ).map_err(|e| format!("打开打印机失败: {}", e))?;
-
-        // RAII guard: close printer handle on any exit path
-        let _guard = PrinterHandle(h_printer);
-
-        // Prepare document info: use "RAW" data type to pass bytes directly to printer driver
-        let doc_name = HSTRING::from("发票打印");
-        let data_type = HSTRING::from("RAW");
-        let doc_info = DOC_INFO_1W {
-            pDocName: PWSTR::from_raw(doc_name.as_ptr() as *mut _),
-            pOutputFile: PWSTR::null(),
-            pDatatype: PWSTR::from_raw(data_type.as_ptr() as *mut _),
-        };
-
-        // Start document
-        let doc_id = StartDocPrinterW(h_printer, 1, &doc_info);
-        if doc_id == 0 {
-            return Err(format!("StartDocPrinter 失败，打印机可能不支持RAW数据类型"));
-        }
-
-        // Write PDF bytes in chunks (WritePrinter has a u32 size limit per call)
-        let mut offset: usize = 0;
-        let total = pdf_bytes.len();
-        while offset < total {
-            let chunk_size = std::cmp::min(total - offset, 64 * 1024) as u32; // 64KB chunks
-            let mut written: u32 = 0;
-            let result = WritePrinter(
-                h_printer,
-                pdf_bytes[offset..].as_ptr() as *const _,
-                chunk_size,
-                &mut written,
-            );
-            if result == BOOL(0) {
-                let _ = EndDocPrinter(h_printer);
-                return Err("WritePrinter 写入数据失败".to_string());
-            }
-            offset += written as usize;
-        }
-
-        // End document
-        if EndDocPrinter(h_printer) == BOOL(0) {
-            return Err("EndDocPrinter 失败".to_string());
-        }
-    }
-
-    Ok(())
-}
 
 // =====================================================
 // App Entry
@@ -519,6 +735,14 @@ fn spool_print_pdf(pdf_bytes: &[u8], printer_name: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(err) = check_windows_version() {
+            show_error_dialog(&err);
+            std::process::exit(1);
+        }
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -639,8 +863,12 @@ pub fn run() {
         trim_image,
         generate_pdf_from_layout,
         print_pdf_file,
+        xps_print,
         parse_ofd,
         open_ofd_images,
+        check_sumatrapdf_available,
+        download_sumatrapdf,
+        sumatrapdf_print,
     ]);
 
     #[cfg(not(feature = "ocr"))]
@@ -659,8 +887,12 @@ pub fn run() {
         trim_image,
         generate_pdf_from_layout,
         print_pdf_file,
+        xps_print,
         parse_ofd,
         open_ofd_images,
+        check_sumatrapdf_available,
+        download_sumatrapdf,
+        sumatrapdf_print,
     ]);
 
     builder

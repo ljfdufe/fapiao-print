@@ -8,6 +8,8 @@ var isTauri = window.__TAURI_INTERNALS__ !== undefined;
 var invoke  = isTauri ? window.__TAURI_INTERNALS__.invoke : null;
 var hasOcr  = false; // Set to true at startup if OCR feature is available
 var APP_VERSION = ''; // Filled at startup from Rust get_app_version()
+var _pdfDirty = true; // PDF dirty flag (needs regeneration)
+var _lastPdfPath = null; // Last generated PDF path for reuse
 
 // =====================================================
 // Constants
@@ -130,6 +132,131 @@ function updateLoadingProgress(phase, current, total) {
 }
 function fmtSize(b) { return b < 1024 ? b + 'B' : b < 1048576 ? (b / 1024).toFixed(1) + 'KB' : (b / 1048576).toFixed(1) + 'MB'; }
 function escHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+// Open URL in external browser (reuse verifyInvoice pattern)
+function openExternal(url) {
+  if (isTauri && invoke) {
+    invoke('open_url', { url: url }).catch(function(e) {
+      console.warn('[openExternal] Tauri open failed:', e);
+      toast('打开浏览器失败，请手动访问: ' + url);
+    });
+  } else {
+    window.open(url, '_blank');
+  }
+}
+
+function showSumatraPdfMissing() {
+  var existing = document.getElementById('sumatraPdfModal');
+  if (existing) { existing.classList.remove('hidden'); return; }
+  var div = document.createElement('div');
+  div.id = 'sumatraPdfModal';
+  div.className = 'modal-bg';
+  div.innerHTML = '<div class="modal" onclick="event.stopPropagation()">' +
+    '<div class="modal-title">未检测到 SumatraPDF</div>' +
+    '<div class="modal-body" style="padding:8px 0;font-size:13px;line-height:1.6;color:var(--text-secondary)">' +
+    'SumatraPDF 是一款免费轻量的 PDF 阅读器，支持真正的静默打印。<br><br>' +
+    '您可以：</div>' +
+    '<div class="modal-actions" style="flex-direction:column;gap:8px">' +
+    '<button class="btn btn-primary" style="width:100%" onclick="downloadSumatraPdf()">自动下载到软件目录</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://www.sumatrapdfreader.org/download-free-pdf-viewer\')">手动下载（官网）</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>' +
+    '</div>' +
+    '<div class="modal-actions" style="margin-top:8px;justify-content:flex-end">' +
+    '<button class="btn btn-sm" onclick="document.getElementById(\'sumatraPdfModal\').classList.add(\'hidden\')">取消</button>' +
+    '</div></div></div>';
+  div.onclick = function() { div.classList.add('hidden'); };
+  document.body.appendChild(div);
+}
+
+async function downloadSumatraPdf() {
+  if (!isTauri || !invoke) return;
+  var modal = document.getElementById('sumatraPdfModal');
+  if (modal) {
+    var body = modal.querySelector('.modal-body');
+    var actions = modal.querySelectorAll('.modal-actions');
+    if (body) body.innerHTML = '<div style="text-align:center;padding:16px 0">' +
+      '<div class="spinner" style="width:40px;height:40px;border-width:3px;margin:0 auto 12px"></div>' +
+      '<div style="font-size:14px;color:var(--text-secondary);margin-bottom:10px">正在下载 SumatraPDF，请稍候...</div>' +
+      '<div style="width:100%;height:14px;background:var(--bg-secondary);border-radius:7px;overflow:hidden">' +
+        '<div id="sumatraDownloadProgress" style="height:100%;width:0%;background:var(--accent);border-radius:7px;transition:width 0.2s"></div>' +
+      '</div>' +
+      '<div id="sumatraDownloadPercent" style="font-size:13px;color:var(--text-muted);margin-top:6px">0%</div>' +
+    '</div>';
+    if (actions[0]) actions[0].innerHTML = '';
+    if (actions[1]) actions[1].innerHTML = '<button class="btn btn-sm" onclick="cancelSumatraDownload()">取消下载</button>';
+    modal.classList.remove('hidden');
+  }
+  _sumatraDownloadAborted = false;
+  var unlistenProgress = null;
+  try {
+    if (isTauri && window.__TAURI_INTERNALS__) {
+      var callbackId = window.__TAURI_INTERNALS__.transformCallback(function(evt) {
+        var progress = evt.payload;
+        var bar = document.getElementById('sumatraDownloadProgress');
+        var percent = document.getElementById('sumatraDownloadPercent');
+        if (bar) bar.style.width = Math.min(100, progress.percent).toFixed(0) + '%';
+        if (percent) percent.textContent = Math.min(100, progress.percent).toFixed(0) + '%';
+      });
+      var eventId = await invoke('plugin:event|listen', {
+        event: 'sumatra-download-progress',
+        target: { kind: 'Any' },
+        handler: callbackId
+      });
+      unlistenProgress = function() {
+        try { invoke('plugin:event|unlisten', { event: 'sumatra-download-progress', eventId: eventId }); } catch(e) {}
+      };
+    }
+    var result = await invoke('download_sumatrapdf');
+    if (unlistenProgress) unlistenProgress();
+    if (_sumatraDownloadAborted) return;
+    if (modal) modal.classList.add('hidden');
+    if (result.success) {
+      toast('\u2705 ' + result.message);
+    } else {
+      showSumatraDownloadError(result.message);
+    }
+  } catch(e) {
+    if (unlistenProgress) unlistenProgress();
+    if (_sumatraDownloadAborted) return;
+    if (modal) modal.classList.add('hidden');
+    showSumatraDownloadError(String(e));
+  }
+}
+
+var _sumatraDownloadAborted = false;
+
+function cancelSumatraDownload() {
+  _sumatraDownloadAborted = true;
+  var modal = document.getElementById('sumatraPdfModal');
+  if (modal) modal.classList.add('hidden');
+  toast('下载已取消');
+}
+
+function showSumatraDownloadError(errMsg) {
+  var modal = document.getElementById('sumatraPdfModal');
+  if (!modal) { showSumatraPdfMissing(); modal = document.getElementById('sumatraPdfModal'); }
+  if (!modal) return;
+  var body = modal.querySelector('.modal-body');
+  var actions = modal.querySelectorAll('.modal-actions');
+  if (body) body.innerHTML = '<div style="padding:12px 16px;background:var(--danger-light);border-radius:8px;border-left:4px solid var(--danger);margin-bottom:4px">' +
+    '<div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:6px">\u274c 下载失败</div>' +
+    '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);word-break:break-all">' + escHtml(errMsg) + '</div>' +
+  '</div>';
+  if (actions[0]) actions[0].innerHTML =
+    '<button class="btn btn-primary" style="width:100%" onclick="downloadSumatraPdf()">重试下载</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://www.sumatrapdfreader.org/download-free-pdf-viewer\')">手动下载（官网）</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>';
+  if (actions[1]) actions[1].innerHTML = '<button class="btn btn-sm" onclick="document.getElementById(\'sumatraPdfModal\').classList.add(\'hidden\')">关闭</button>';
+  modal.classList.remove('hidden');
+}
+
+function switchToPdfMode() {
+  document.getElementById('printMode').value = 'pdf';
+  try { localStorage.setItem('fapiao-print-mode', 'pdf'); } catch(e) {}
+  var modal = document.getElementById('sumatraPdfModal');
+  if (modal) modal.classList.add('hidden');
+  toast('已切换到 PDF 阅读器模式');
+}
 
 // Convert data URL to Uint8Array
 function dataUrlToUint8Array(dataUrl) {
@@ -576,8 +703,7 @@ var _ocrToastActive = false; // track if "识别中" toast is showing
 var _ocrFromButton = false;  // true = OCR triggered by single-file button click (show per-file result toast)
 var _ocrBatchTotal = 0;     // Total files in current batch (for progress display)
 var _ocrBatchAddedCount = 0; // Total added files in current loading batch (for final toast message)
-var _lastPdfPath = null;   // Path of last generated/saved PDF (for print cache)
-var _pdfDirty = true;      // Whether PDF content has changed since last generation
+
 
 /** Yield to browser for reliable painting — double rAF ensures at least one frame is painted */
 function nextFrame() { return new Promise(function(r) { requestAnimationFrame(function() { requestAnimationFrame(r); }); }); }
@@ -1333,7 +1459,6 @@ function onAdjScaleChange() {
   var f = getSelectedFileObj();
   if (!f) return;
   f.slotScale = Math.max(0.2, Math.min(2.0, parseInt(document.getElementById('adjScale').value) / 100));
-  _pdfDirty = true;
   updatePreview();
 }
 
@@ -1342,7 +1467,6 @@ function onAdjOffsetChange() {
   if (!f) return;
   f.slotOffsetX = parseFloat(document.getElementById('adjOffX').value) || 0;
   f.slotOffsetY = parseFloat(document.getElementById('adjOffY').value) || 0;
-  _pdfDirty = true;
   updatePreview();
 }
 
@@ -1353,7 +1477,6 @@ function resetSlotAdj() {
   f.slotOffsetX = 0;
   f.slotOffsetY = 0;
   updateAdjPanel();
-  _pdfDirty = true;
   updatePreview();
 }
 
@@ -1366,7 +1489,6 @@ function applySlotAdjToAll() {
     file.slotOffsetX = ox;
     file.slotOffsetY = oy;
   });
-  _pdfDirty = true;
   updatePreview();
   toast('已应用到全部 ' + S.files.length + ' 张发票');
 }
@@ -1502,7 +1624,12 @@ function switchTab(n, el) {
   }
 }
 function onPaperChange() { document.getElementById('customPaperRow').style.display = document.getElementById('paperSize').value === 'custom' ? 'flex' : 'none'; updatePreview(); }
-function onFitChange() { document.getElementById('customScaleRow').style.display = document.getElementById('fitMode').value === 'custom' ? 'flex' : 'none'; updatePreview(); }
+function onFitChange() {
+  var isCustom = document.getElementById('fitMode').value === 'custom';
+  document.getElementById('customScaleRow').style.display = isCustom ? 'flex' : 'none';
+  document.getElementById('customScaleHint').style.display = isCustom ? 'block' : 'none';
+  updatePreview();
+}
 function setMP(t, b, l, r) {
   [['marginTop', 'marginTopN', t], ['marginBottom', 'marginBottomN', b], ['marginLeft', 'marginLeftN', l], ['marginRight', 'marginRightN', r]].forEach(function(arr) {
     document.getElementById(arr[0]).value = arr[2]; document.getElementById(arr[1]).value = arr[2];
@@ -1801,7 +1928,7 @@ function resetSettings() {
   document.getElementById('toggleOcrEnabled').classList.remove('on');
   document.getElementById('togglePdfText').classList.remove('on');
   document.getElementById('ocrPrecision').value = 'standard';
-  document.getElementById('printMode').value = 'dialog';
+  document.getElementById('printMode').value = 'pdf';
   document.getElementById('themeMode').value = 'light';
   document.documentElement.classList.remove('dark');
   try { localStorage.removeItem('fapiao-theme'); } catch(e) {}
@@ -1962,8 +2089,11 @@ document.getElementById('orientation').value = 'landscape';
 (function() {
   try {
     var pm = localStorage.getItem('fapiao-print-mode');
-    if (pm && (pm === 'dialog' || pm === 'direct')) {
+    if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdf')) {
       document.getElementById('printMode').value = pm;
+    } else {
+      // Default to PDF reader mode for better print quality
+      document.getElementById('printMode').value = 'pdf';
     }
   } catch(e) {}
 })();
