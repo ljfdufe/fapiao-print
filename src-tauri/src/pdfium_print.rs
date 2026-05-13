@@ -319,6 +319,13 @@ fn build_dev_mode(
     let mut dm = DEVMODEW::default();
     dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
 
+    if paper_w_mm > paper_h_mm {
+        dm.Anonymous1.Anonymous1.dmOrientation = DMORIENT_LANDSCAPE as i16;
+    } else {
+        dm.Anonymous1.Anonymous1.dmOrientation = DMORIENT_PORTRAIT as i16;
+    }
+    dm.dmFields |= DM_ORIENTATION;
+
     if copies > 1 {
         dm.Anonymous1.Anonymous1.dmCopies = copies as i16;
         dm.dmFields |= DM_COPIES;
