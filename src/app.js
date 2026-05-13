@@ -39,7 +39,7 @@ var S = {
     printDate: false, footer: false,
     autoOpenPdf: true,
     ocrEnabled: false,
-    pdfTextEnabled: false,  // PDF文字层提取（默认关闭以提高加载速度）
+    pdfTextEnabled: true,
     customFM: false
   }
 };
@@ -2038,7 +2038,13 @@ function resetSettings() {
   document.getElementById('toggleDate').classList.remove('on');
   document.getElementById('toggleAutoOpenPdf').classList.add('on');
   document.getElementById('toggleOcrEnabled').classList.remove('on');
-  document.getElementById('togglePdfText').classList.remove('on');
+  document.getElementById('togglePdfText').classList.add('on');
+  document.getElementById('toggleFooter').classList.remove('on');
+  document.getElementById('toggleCustomFM').classList.remove('on');
+  document.getElementById('footerOpts').style.display = 'none';
+  document.getElementById('customFMRow').style.display = 'none';
+  document.getElementById('footerMarginRow').style.display = 'none';
+  document.getElementById('footerMargin').value = 8; document.getElementById('footerMarginN').value = 8;
   document.getElementById('ocrPrecision').value = 'standard';
   document.getElementById('printMode').value = 'pdf';
   document.getElementById('themeMode').value = 'light';
@@ -2224,9 +2230,12 @@ document.getElementById('orientation').value = 'landscape';
 (function() {
   try {
     var v = localStorage.getItem('fapiao-pdf-text-enabled');
-    if (v === '1') {
+    var btn = document.getElementById('togglePdfText');
+    if (v === '0') {
+      S.feat.pdfTextEnabled = false;
+      if (btn) btn.classList.remove('on');
+    } else {
       S.feat.pdfTextEnabled = true;
-      var btn = document.getElementById('togglePdfText');
       if (btn) btn.classList.add('on');
     }
   } catch(e) {}
