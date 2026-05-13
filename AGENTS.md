@@ -2,12 +2,12 @@
 
 ## 项目概览
 
-- **版本**: v1.9.7
+- **版本**: v1.9.9
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{lib.rs, pdf_engine.rs, pdfium_print.rs}`
 - **OFD 解析**: `src-tauri/ofd-engine/` — 独立 crate
-- **双版本**: 轻量版(~3.5MB) / OCR版(~24MB)
+- **双版本**: 轻量版 / OCR版（含 PP-OCRv5）
 
 ## 常用命令
 
@@ -137,3 +137,14 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 - 简洁直接，对 Bug 极度敏感，全面修复原则
 - 不要主动编译（耗时），等明确指令
 - 分析任务绝对不可修改代码，必须先确认方案
+
+---
+
+## Release 检查清单
+
+每次 release 前必须完成以下文档更新：
+
+1. **README.md**：更新功能描述、技术栈版本等，确保与当前版本一致
+2. **CHANGELOG.md**：补充新版本更新日志，包含新功能/修复/优化/依赖变更等
+3. **AGENTS.md**：更新版本号、架构要点（如有变更）
+4. **其他文档**：如有新增配置/命令/架构变更，同步更新对应文档

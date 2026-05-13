@@ -6,7 +6,7 @@
 
 轻量桌面应用，专为批量打印电子发票设计。支持 PDF、OFD、图片等多格式导入，智能排版，一键打印或导出。
 
-提供 **轻量版**（~3.5MB）和 **OCR 版**（~24MB，含 PP-OCRv5 智能识别），单文件 exe 即开即用。
+提供 **轻量版** 和 **OCR 版**（含 PP-OCRv5 智能识别），单文件 exe 即开即用。
 
 ## ✨ 功能特性
 
@@ -176,7 +176,7 @@ npm run bump 1.9.8   # 同步 package.json → Cargo.toml → tauri.conf.json
 - [x] EXIF 方向 / PDF Rotate / CropBox 归一化自动修正
 - [x] OFD 自闭合标签解析修复 + 字段级联保护
 - [x] OFD ImageMask 遮罩兼容（iloveofd 等二次转换 OFD 红章黑色背景修复）
-- ~~[ ] 低版本系统支持（Windows 7/8，待定）~~
+- ❌️ 低版本系统支持（Windows 7/8）
 
 ## 🤖 关于此项目
 
