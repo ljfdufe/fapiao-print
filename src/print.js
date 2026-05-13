@@ -178,7 +178,7 @@ function showPrintConfirm(files, s) {
 
   var engineSelect = '<select id="confirmPrintEngine" style="padding:1px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px">'
     + '<option value="pdfium">PDFium（推荐）</option>'
-    + '<option value="sumatra">SumatraPDF</option>'
+    + '<option value="sumatra">SumatraPDF（备用）</option>'
     + '</select>';
 
   var html = row('打印机', escHtml(printerName))
