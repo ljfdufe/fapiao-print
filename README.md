@@ -1,3 +1,5 @@
+![fapiao-print](https://socialify.git.ci/erma0/fapiao-print/image?description=1&font=Source+Code+Pro&forks=1&issues=1&language=1&name=1&owner=1&pattern=Circuit+Board&stargazers=1&theme=Auto)
+
 # 📄 电子发票批量打印工具
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -176,7 +178,7 @@ npm run bump 1.9.8   # 同步 package.json → Cargo.toml → tauri.conf.json
 - [x] EXIF 方向 / PDF Rotate / CropBox 归一化自动修正
 - [x] OFD 自闭合标签解析修复 + 字段级联保护
 - [x] OFD ImageMask 遮罩兼容（iloveofd 等二次转换 OFD 红章黑色背景修复）
-- ❌️ 低版本系统支持（Windows 7/8）
+~~❌️ 低版本系统支持（Windows 7/8）~~
 
 ## 🤖 关于此项目
 
@@ -185,3 +187,7 @@ npm run bump 1.9.8   # 同步 package.json → Cargo.toml → tauri.conf.json
 ## 📄 许可证
 
 [MIT License](LICENSE)
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=erma0/fapiao-print&type=Date)](https://star-history.com/#erma0/fapiao-print&Date)
