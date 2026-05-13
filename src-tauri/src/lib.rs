@@ -1,6 +1,11 @@
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use tauri::{command, Emitter};
 
 mod pdf_engine;
+#[cfg(target_os = "windows")]
+mod pdfium_print;
+
+static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 fn check_windows_version() -> Result<(), String> {
@@ -426,9 +431,301 @@ fn check_sumatrapdf_available() -> bool {
     pdf_engine::find_sumatrapdf().is_some()
 }
 
+/// Check if pdfium.dll is available for vector printing
+#[command]
+fn check_pdfium_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        pdfium_print::find_pdfium_dll().is_some()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Cancel any in-progress download (pdfium.dll or SumatraPDF)
+#[command]
+fn cancel_download() {
+    DOWNLOAD_CANCELLED.store(true, AtomicOrdering::SeqCst);
+}
+
+/// Print a PDF file using PDFium vector rendering (EMF → printer DC).
+/// Generates PDF from layout, then prints via PDFium. Saves PDF path for cache reuse.
+#[cfg(target_os = "windows")]
+#[command]
+async fn pdfium_vector_print(
+    app: tauri::AppHandle,
+    request: LayoutRenderRequest,
+    printer_name: Option<String>,
+) -> Result<pdf_engine::PdfResult, String> {
+    use std::sync::atomic::Ordering;
+
+    if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("应用正在关闭".to_string());
+    }
+
+    let resolved_printer = match printer_name {
+        Some(name) if !name.is_empty() => name,
+        _ => pdf_engine::get_default_printer_name()
+            .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?,
+    };
+
+    let copies = request.settings.copies;
+    let duplex = request.settings.duplex;
+    let color_mode = request.settings.color_mode.clone();
+    let paper_w = request.settings.paper_w;
+    let paper_h = request.settings.paper_h;
+
+    let app_handle = app.clone();
+    let progress_cb: pdf_engine::ProgressFn = Box::new(move |phase, current, total| {
+        let _ = app_handle.emit("pdf-progress", serde_json::json!({
+            "phase": phase,
+            "current": current,
+            "total": total,
+        }));
+    });
+
+    let temp_dir = std::env::temp_dir().join("fapiao_pdfium");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let output_path = temp_dir.join("pdfium_cache.pdf");
+
+    let output_path_for_print = output_path.clone();
+    let _pdf_result = tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::generate_pdf_from_layout(&request, &output_path, Some(progress_cb))
+    })
+    .await
+    .map_err(|e| format!("PDF生成任务失败: {}", e))?
+    .map_err(|e| {
+        let _ = std::fs::remove_file(&output_path_for_print);
+        format!("PDF生成失败: {}", e)
+    })?;
+
+    let pdf_path_str = output_path_for_print.to_string_lossy().to_string();
+
+    let result = pdfium_print_pdf(
+        app,
+        pdf_path_str,
+        Some(resolved_printer),
+        copies,
+        duplex,
+        color_mode,
+        paper_w,
+        paper_h,
+    ).await?;
+
+    Ok(result)
+}
+
+/// Print an existing PDF file using PDFium vector rendering.
+/// Used when the PDF hasn't changed since last generation (cache reuse).
+#[cfg(target_os = "windows")]
+#[command]
+async fn pdfium_print_pdf(
+    app: tauri::AppHandle,
+    pdf_path: String,
+    printer_name: Option<String>,
+    copies: u32,
+    duplex: bool,
+    color_mode: String,
+    paper_w: f32,
+    paper_h: f32,
+) -> Result<pdf_engine::PdfResult, String> {
+    use std::sync::atomic::Ordering;
+
+    if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("应用正在关闭".to_string());
+    }
+
+    let path = std::path::Path::new(&pdf_path);
+    if !path.exists() {
+        return Err("PDF文件不存在".to_string());
+    }
+
+    let resolved_printer = match printer_name {
+        Some(name) if !name.is_empty() => name,
+        _ => pdf_engine::get_default_printer_name()
+            .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?,
+    };
+
+    let pdf_bytes = std::fs::read(path)
+        .map_err(|e| format!("读取PDF失败: {}", e))?;
+
+    let app_for_progress = app.clone();
+    let printer = resolved_printer.clone();
+    let print_progress_cb = move |current: u32, total: u32| {
+        let _ = app_for_progress.emit("pdf-progress", serde_json::json!({
+            "phase": "print",
+            "current": current,
+            "total": total,
+        }));
+    };
+
+    let print_result = tauri::async_runtime::spawn_blocking(move || {
+        pdfium_print::pdfium_vector_print(
+            &pdf_bytes,
+            &printer,
+            copies,
+            duplex,
+            &color_mode,
+            paper_w,
+            paper_h,
+            Some(&print_progress_cb),
+        )
+    })
+    .await
+    .map_err(|e| format!("打印任务失败: {}", e))?
+    .map_err(|e| format!("PDFium打印失败: {}", e))?;
+
+    let mut result = print_result;
+    result.pdf_path = Some(pdf_path);
+
+    Ok(result)
+}
+
+/// Download pdfium.dll to the app's tools directory for vector printing
+#[cfg(target_os = "windows")]
+#[command]
+async fn download_pdfium_dll(app: tauri::AppHandle) -> Result<pdf_engine::PdfResult, String> {
+    DOWNLOAD_CANCELLED.store(false, AtomicOrdering::SeqCst);
+
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("无法获取应用路径: {}", e))?
+        .parent()
+        .ok_or("无法获取应用目录")?
+        .to_path_buf();
+
+    let tools_dir = exe_dir.join("tools");
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| format!("创建 tools 目录失败: {}", e))?;
+
+    let dest = tools_dir.join("pdfium.dll");
+    if dest.exists() {
+        return Ok(pdf_engine::PdfResult {
+            success: true,
+            message: "pdfium.dll 已存在".to_string(),
+            pdf_path: Some(dest.to_string_lossy().to_string()),
+            warnings: None,
+        });
+    }
+
+    let dll_url = "https://gh-proxy.com/https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7834/pdfium-win-x64.tgz";
+    let tgz_path = tools_dir.join("pdfium-win-x64.tgz");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {}", e))?;
+
+    {
+        let mut file = std::fs::File::create(&tgz_path)
+            .map_err(|e| format!("创建临时文件失败: {}", e))?;
+        let mut stream = client.get(dll_url)
+            .send()
+            .await
+            .map_err(|e| format!("下载失败: {}", e))?;
+
+        if !stream.status().is_success() {
+            std::fs::remove_file(&tgz_path).ok();
+            return Err(format!("下载失败，HTTP 状态: {}", stream.status()));
+        }
+
+        let total_size = stream.content_length().unwrap_or(0);
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk) = stream.chunk().await.map_err(|e| format!("下载出错: {}", e))? {
+            if DOWNLOAD_CANCELLED.load(AtomicOrdering::SeqCst) {
+                drop(file);
+                std::fs::remove_file(&tgz_path).ok();
+                return Err("下载已取消".to_string());
+            }
+            use std::io::Write;
+            file.write_all(&chunk)
+                .map_err(|e| format!("写入文件失败: {}", e))?;
+            downloaded += chunk.len() as u64;
+            let _ = app.emit("pdfium-download-progress", serde_json::json!({
+                "current": downloaded,
+                "total": total_size,
+                "percent": if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 }
+            }));
+        }
+    }
+
+    let tgz_file = std::fs::File::open(&tgz_path)
+        .map_err(|e| format!("打开 tgz 失败: {}", e))?;
+    let gz_decoder = flate2::read::GzDecoder::new(tgz_file);
+    let mut archive = tar::Archive::new(gz_decoder);
+    let mut found_dll = false;
+
+    for entry_result in archive.entries().map_err(|e| format!("解析 tgz 失败: {}", e))? {
+        let mut entry = entry_result.map_err(|e| format!("读取 tgz 条目失败: {}", e))?;
+        let path = entry.path().map_err(|e| format!("获取路径失败: {}", e))?;
+        let file_name = path.file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if file_name.eq_ignore_ascii_case("pdfium.dll") {
+            let mut out_file = std::fs::File::create(&dest)
+                .map_err(|e| format!("创建 pdfium.dll 失败: {}", e))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("解压失败: {}", e))?;
+            found_dll = true;
+            break;
+        }
+    }
+
+    std::fs::remove_file(&tgz_path).ok();
+
+    if !found_dll {
+        return Err("tgz 中未找到 pdfium.dll".to_string());
+    }
+
+    log::info!("pdfium.dll downloaded to: {}", dest.display());
+
+    Ok(pdf_engine::PdfResult {
+        success: true,
+        message: format!("pdfium.dll 已下载到: {}", dest.display()),
+        pdf_path: Some(dest.to_string_lossy().to_string()),
+        warnings: None,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[command]
+async fn pdfium_vector_print(
+    _app: tauri::AppHandle,
+    _request: LayoutRenderRequest,
+    _printer_name: Option<String>,
+) -> Result<pdf_engine::PdfResult, String> {
+    Err("PDFium打印仅支持Windows系统".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[command]
+async fn pdfium_print_pdf(
+    _app: tauri::AppHandle,
+    _pdf_path: String,
+    _printer_name: Option<String>,
+    _copies: u32,
+    _duplex: bool,
+    _color_mode: String,
+    _paper_w: f32,
+    _paper_h: f32,
+) -> Result<pdf_engine::PdfResult, String> {
+    Err("PDFium打印仅支持Windows系统".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[command]
+async fn download_pdfium_dll(_app: tauri::AppHandle) -> Result<pdf_engine::PdfResult, String> {
+    Err("PDFium下载仅支持Windows系统".to_string())
+}
+
 /// Download SumatraPDF portable (ZIP) to the app's tools directory
 #[command]
 async fn download_sumatrapdf(app: tauri::AppHandle) -> Result<pdf_engine::PdfResult, String> {
+    DOWNLOAD_CANCELLED.store(false, AtomicOrdering::SeqCst);
+
     let tools_dir = std::env::current_exe()
         .map_err(|e| format!("无法获取应用路径: {}", e))?
         .parent()
@@ -474,6 +771,11 @@ async fn download_sumatrapdf(app: tauri::AppHandle) -> Result<pdf_engine::PdfRes
         let mut downloaded: u64 = 0;
 
         while let Some(chunk) = stream.chunk().await.map_err(|e| format!("下载出错: {}", e))? {
+            if DOWNLOAD_CANCELLED.load(AtomicOrdering::SeqCst) {
+                drop(file);
+                std::fs::remove_file(&zip_path).ok();
+                return Err("下载已取消".to_string());
+            }
             use std::io::Write;
             file.write_all(&chunk)
                 .map_err(|e| format!("写入文件失败: {}", e))?;
@@ -576,68 +878,6 @@ fn sumatrapdf_print(
         pdf_path: Some(pdf_path),
         warnings: None,
     })
-}
-
-/// XPS direct print — builds XPS in memory and sends to printer via StartXpsPrintJob.
-/// No PDF file is generated. Used for silent/direct printing mode.
-#[cfg(target_os = "windows")]
-#[command]
-async fn xps_print(
-    app: tauri::AppHandle,
-    request: LayoutRenderRequest,
-    printer_name: Option<String>,
-) -> Result<pdf_engine::PdfResult, String> {
-    use std::sync::atomic::Ordering;
-
-    if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
-        return Err("应用正在关闭".to_string());
-    }
-
-    let resolved_printer = match printer_name {
-        Some(name) if !name.is_empty() => name,
-        _ => pdf_engine::get_default_printer_name()
-            .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?,
-    };
-
-    let app_handle = app.clone();
-    let progress_cb: pdf_engine::ProgressFn = Box::new(move |phase, current, total| {
-        let _ = app_handle.emit("pdf-progress", serde_json::json!({
-            "phase": phase,
-            "current": current,
-            "total": total,
-        }));
-    });
-
-    let printer_for_job = resolved_printer.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        pdf_engine::xps_print(&request, &printer_for_job, Some(&progress_cb))
-    })
-    .await
-    .map_err(|e| format!("XPS打印任务失败: {}", e))?
-    .map_err(|e| format!("XPS打印失败: {}", e))?;
-
-    let msg = if resolved_printer.is_empty() {
-        "已发送到默认打印机".to_string()
-    } else {
-        format!("已发送到打印机「{}」", resolved_printer)
-    };
-
-    Ok(pdf_engine::PdfResult {
-        success: true,
-        message: msg,
-        pdf_path: None,
-        warnings: None,
-    })
-}
-
-#[cfg(not(target_os = "windows"))]
-#[command]
-async fn xps_print(
-    _app: tauri::AppHandle,
-    _request: LayoutRenderRequest,
-    _printer_name: Option<String>,
-) -> Result<pdf_engine::PdfResult, String> {
-    Err("XPS打印仅支持Windows系统".to_string())
 }
 
 // =====================================================
@@ -863,10 +1103,14 @@ pub fn run() {
         trim_image,
         generate_pdf_from_layout,
         print_pdf_file,
-        xps_print,
         parse_ofd,
         open_ofd_images,
         check_sumatrapdf_available,
+        check_pdfium_available,
+        cancel_download,
+        pdfium_vector_print,
+        pdfium_print_pdf,
+        download_pdfium_dll,
         download_sumatrapdf,
         sumatrapdf_print,
     ]);
@@ -887,10 +1131,14 @@ pub fn run() {
         trim_image,
         generate_pdf_from_layout,
         print_pdf_file,
-        xps_print,
         parse_ofd,
         open_ofd_images,
         check_sumatrapdf_available,
+        check_pdfium_available,
+        cancel_download,
+        pdfium_vector_print,
+        pdfium_print_pdf,
+        download_pdfium_dll,
         download_sumatrapdf,
         sumatrapdf_print,
     ]);

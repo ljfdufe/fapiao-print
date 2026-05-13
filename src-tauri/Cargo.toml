@@ -1,6 +1,6 @@
 [package]
 name = "fapiao-print"
-version = "1.9.7"
+version = "1.9.8"
 description = "电子发票批量打印工具"
 authors = ["fapiao-print"]
 license = "MIT"
@@ -38,8 +38,10 @@ kamadak-exif = "0.5"
 ocr-rs = { version = "2.2", optional = true }
 ofd-engine = { path = "ofd-engine" }
 flate2 = "1.1.9"
+tar = "0.4"
 zip = "2"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+libloading = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

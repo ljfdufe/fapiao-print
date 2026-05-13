@@ -146,6 +146,8 @@ async function doPrint() {
 
   if (printMode === 'confirm') {
     showPrintConfirm(files, s);
+  } else if (printMode === 'pdfium') {
+    await doPdfiumPrint(files, s);
   } else if (printMode === 'pdf') {
     await doPdfReaderPrint(files, s);
   } else {
@@ -169,27 +171,22 @@ function showPrintConfirm(files, s) {
 
   var fitLabel = s.fitMode === 'contain' ? '适应' : s.fitMode === 'cover' ? '填充' : (Math.round(s.customScale * 100) + '%');
   var rotLabel = s.globalRotation === 'auto' ? '自动' : s.globalRotation + '\u00B0';
-  var duplexLabel = s.duplex ? '是' : '否';
-  var cutlineLabel = s.cutline ? '是' : '否';
 
   var row = function(lbl, val, cls) {
-    return '<div class="modal-row' + (cls ? ' ' + cls : '') + '"><span class="modal-lbl">' + lbl + '</span><span class="modal-val">' + val + '</span></div>';
+    return '<div class="modal-row compact' + (cls ? ' ' + cls : '') + '"><span class="modal-lbl">' + lbl + '</span><span class="modal-val">' + val + '</span></div>';
   };
 
+  var engineSelect = '<select id="confirmPrintEngine" style="padding:1px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px">'
+    + '<option value="pdfium">PDFium（推荐）</option>'
+    + '<option value="sumatra">SumatraPDF</option>'
+    + '</select>';
+
   var html = row('打印机', escHtml(printerName))
-    + row('发票', activeCount + ' 张')
-    + row('布局', layout)
-    + row('纸张', paper + ' ' + orient)
-    + row('边距', s.marginTop + '/' + s.marginBottom + '/' + s.marginLeft + '/' + s.marginRight + 'mm')
-    + row('间距', s.gapH + '/' + s.gapV + 'mm')
-    + row('缩放', fitLabel)
-    + row('旋转', rotLabel)
-    + row('份数', copies)
-    + row('颜色', colorLabel)
-    + row('双面', duplexLabel)
-    + row('切割线', cutlineLabel)
-    + '<div class="modal-sep"></div>'
-    + row('最终页数', totalPages + ' 页', 'highlight');
+    + row('引擎', engineSelect)
+    + row('发票', activeCount + ' 张 \u00D7 ' + copies + ' 份 \u2192 ' + totalPages + ' 页', 'highlight')
+    + row('布局', layout + ' \u00B7 ' + paper + orient + ' \u00B7 ' + fitLabel + ' \u00B7 ' + rotLabel)
+    + row('边距', s.marginTop + '/' + s.marginBottom + '/' + s.marginLeft + '/' + s.marginRight + 'mm \u00B7 间距 ' + s.gapH + '/' + s.gapV + 'mm')
+    + row('选项', colorLabel + ' \u00B7 ' + (s.duplex ? '双面' : '单面') + ' \u00B7 ' + (s.cutline ? '切割线' : '无切割线'));
 
   document.getElementById('printConfirmBody').innerHTML = html;
   document.getElementById('printConfirmModal').classList.remove('hidden');
@@ -203,7 +200,14 @@ async function confirmPrint() {
   closePrintConfirm();
   var files = getActiveFiles();
   var s = getSettings();
-  await doSumatraPrint(files, s);
+  var engineEl = document.getElementById('confirmPrintEngine');
+  var engine = engineEl ? engineEl.value : 'pdfium';
+
+  if (engine === 'pdfium') {
+    await doPdfiumPrint(files, s);
+  } else {
+    await doSumatraPrint(files, s);
+  }
 }
 
 async function doSumatraPrint(files, s) {
@@ -221,21 +225,24 @@ async function doSumatraPrint(files, s) {
 
   if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
     try {
+      showLoading('正在使用缓存PDF打印...');
       var result = await invoke('sumatrapdf_print', {
         pdfPath: _lastPdfPath,
         printerName: s.printerName || null,
-        copies: s.copies,
-        duplex: s.duplex,
-        colorMode: document.getElementById('colorMode').value,
+        copies: s.copies || 1,
+        duplex: s.duplex || false,
+        colorMode: s.colorMode || 'color',
         fitMode: s.fitMode,
-        paperW: s.paperW,
-        paperH: s.paperH
+        paperW: s.paperW || 210,
+        paperH: s.paperH || 297
       });
+      hideLoading();
       if (result.success) {
         toast('\uD83D\uDCA8 ' + result.message);
         return;
       }
     } catch(e) {
+      hideLoading();
       console.warn('Cached sumatrapdf print failed:', e);
     }
   }
@@ -277,20 +284,61 @@ async function doSumatraPrint(files, s) {
   }
 }
 
-async function doXpsPrint(files, s) {
-  showLoading('正在准备打印...');
+async function doPdfiumPrint(files, s) {
+  if (isTauri && invoke) {
+    try {
+      var available = await invoke('check_pdfium_available');
+      if (!available) {
+        showPdfiumMissing();
+        return;
+      }
+    } catch(e) {
+      console.warn('check_pdfium_available failed:', e);
+    }
+  }
+
+  if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
+    try {
+      showLoading('正在使用缓存PDF打印（PDFium）...');
+      var unlisten0 = await listenPdfProgress();
+      var cacheResult = await invoke('pdfium_print_pdf', {
+        pdfPath: _lastPdfPath,
+        printerName: s.printerName || null,
+        copies: s.copies || 1,
+        duplex: s.duplex || false,
+        colorMode: s.colorMode || 'color',
+        paperW: s.paperW || 210,
+        paperH: s.paperH || 297
+      });
+      if (unlisten0) unlisten0();
+      hideLoading();
+      if (cacheResult.success) {
+        toast('\uD83D\uDCA8 ' + cacheResult.message);
+        return;
+      }
+      console.warn('Cached PDF PDFium print failed, regenerating:', cacheResult.message);
+    } catch(e) {
+      hideLoading();
+      console.warn('Cached PDF PDFium print failed, regenerating:', e);
+    }
+  }
+
+  showLoading('正在准备静默打印（PDFium）...');
   var unlisten = await listenPdfProgress();
   try {
     var layoutReq = buildLayoutRequest(files, s);
+
     if (isTauri && invoke) {
-      document.getElementById('loadingText').textContent = '正在发送到打印机...';
-      var result = await invoke('xps_print', {
+      document.getElementById('loadingText').textContent = '正在生成PDF并渲染...';
+      var result = await invoke('pdfium_vector_print', {
         request: layoutReq,
         printerName: s.printerName || null
       });
       if (unlisten) unlisten();
       hideLoading();
       if (result.success) {
+        _pdfDirty = false;
+        if (result.pdfPath) _lastPdfPath = result.pdfPath;
         toast('\uD83D\uDCA8 ' + result.message);
       } else {
         toast('打印失败：' + result.message);
@@ -303,7 +351,7 @@ async function doXpsPrint(files, s) {
   } catch (err) {
     if (unlisten) unlisten();
     hideLoading();
-    console.error('XPS print error:', err);
+    console.error('PDFium vector print error:', err);
     toast('打印出错：' + String(err));
   }
 }
@@ -311,16 +359,19 @@ async function doXpsPrint(files, s) {
 async function doPdfReaderPrint(files, s) {
   if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
     try {
+      showLoading('正在使用缓存PDF打印...');
       var cacheResult = await invoke('print_pdf_file', {
         pdfPath: _lastPdfPath,
         directPrint: true,
         printerName: s.printerName || null
       });
+      hideLoading();
       if (cacheResult.success) {
         toast('\uD83D\uDCC4 ' + cacheResult.message);
         return;
       }
     } catch(e) {
+      hideLoading();
       console.warn('Cached PDF reuse failed, regenerating:', e);
     }
   }

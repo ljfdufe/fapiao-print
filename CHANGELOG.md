@@ -1,5 +1,53 @@
 # 📋 更新日志
 
+## v1.9.8 — PDFium 矢量打印 + XPS 清理 + 打印体验优化
+
+### 🚀 新功能
+
+- **PDFium 矢量静默打印**：新增 Chromium PDFium 引擎直打打印机 DC，打印清晰，Spool 体积极小
+  - `pdfium_print.rs` 新模块：`FPDF_LoadMemDocument` 内存加载 → `FPDF_RenderPage(printer_dc)` 直打，无需 EMF 中间层
+  - DLL 全局生命周期管理：`LazyLock<Mutex<Option<PdfiumState>>>` + `with_pdfium()` 闭包串行化
+  - 按需下载：`download_pdfium_dll` 命令，`gh-proxy.com` 加速国内下载，`cancel_download` 命令支持取消
+  - 缺失弹窗：自动下载 / 手动下载（GitHub Releases）/ 切换到 PDF 阅读器模式
+- **弹窗确认模式增加引擎选择**：确认弹窗内可选 PDFium（推荐）或 SumatraPDF
+- **下载取消机制**：`AtomicBool DOWNLOAD_CANCELLED` 全局标志，前端取消时 Rust 端立即停止下载并清理临时文件（PDFium + SumatraPDF 均支持）
+
+### 🐛 修复
+
+- **PDFium 打印模糊**：首版 EMF 中间层方案坐标映射错误（0.01mm 画框 vs 像素内容），改为直接渲染到打印机 DC，以打印机原生 DPI 输出
+- **`cancelPdfiumDownload` / `cancelSumatraDownload` 仅设 JS 标志**：Rust 端继续下载浪费带宽，现通过 `cancel_download` 命令通知 Rust 端停止
+- **`doSumatraPrint` 参数默认值缺失**：`copies`/`duplex`/`paperW`/`paperH`/`colorMode` 添加 `||` 兜底
+- **`colorMode` 默认值为空字符串**：改为 `'color'`，三个打印渠道统一为 `s.colorMode || 'color'`
+
+### 🔧 优化
+
+- **打印模式重命名**：选项名即说明，`静默打印（PDFium）⭐` / `静默打印（SumatraPDF）` / `弹窗确认` / `PDF阅读器`
+- **弹窗确认精简**：15 行合并为 6 行，缩小行间距，不再需要滚动
+- **PDF 缓存复用统一**：`_pdfDirty` + `_lastPdfPath` 跨三个打印渠道共享，PDFium 命中缓存时跳过生成
+- **`pdfium_print_pdf` 参数类型安全**：`Option<u32>` → `u32`，`Option<f32>` → `f32`
+- **临时文件固定命名**：`pdfium_cache.pdf` 替代时间戳命名，不再累积
+- **`pdfium_vector_print` 简化**：生成 PDF 后直接调用 `pdfium_print_pdf`，消除冗余磁盘读取
+- **DLL 统一存放**：`pdfium.dll` 移至 `{exe}/tools/` 目录，与 `SumatraPDF.exe` 一致
+- **下载源更新**：`niclas/pdfium-binaries` → `bblanchon/pdfium-binaries`（更主流），`gh-proxy.com` 加速
+- **默认打印模式**：改为 PDF 阅读器（无需下载依赖即可使用）
+- **UI 措辞**：去掉 Spool/矢量/光栅化等技术术语，改为"推荐"/"需下载"等用户友好描述
+- **手动下载提示**：弹窗提示文件放置路径（tools 文件夹）和重命名要求
+
+### 🗑️ 清理
+
+- **XPS 打印代码全部移除**：`pdf_engine.rs` 删除 ~770 行（`xps_print`、`build_xps_bytes`、`build_xps_doc_xml` 等 12 个函数）
+- **`render_footer_text_png` 死代码移除**：仅 XPS 使用的页脚 PNG 渲染函数（~56 行）
+- **`doXpsPrint` 前端函数移除**
+- **`xps_print` Tauri 命令移除**（Windows + 非 Windows 版本 + invoke_handler 注册）
+- **净减少 ~370 行代码**
+
+### 📦 新增依赖
+
+- `libloading = "0.8"` — 动态加载 pdfium.dll
+- `tar = "0.4"` — 解压 pdfium tgz 包
+
+---
+
 ## v1.9.7 — dzcp/iloveofd 格式兼容修复 + 非税发票金额修复
 
 ### 🚀 新功能

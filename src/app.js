@@ -123,6 +123,9 @@ function updateLoadingProgress(phase, current, total) {
     } else if (phase === 'save') {
       detail.textContent = '';
       if (text) text.textContent = '正在写入PDF...';
+    } else if (phase === 'print') {
+      detail.textContent = current + ' / ' + total + ' 页';
+      if (text) text.textContent = '正在渲染打印...';
     } else {
       detail.textContent = current + ' / ' + total;
       if (text) text.textContent = '正在处理...';
@@ -154,10 +157,10 @@ function showSumatraPdfMissing() {
   div.innerHTML = '<div class="modal" onclick="event.stopPropagation()">' +
     '<div class="modal-title">未检测到 SumatraPDF</div>' +
     '<div class="modal-body" style="padding:8px 0;font-size:13px;line-height:1.6;color:var(--text-secondary)">' +
-    'SumatraPDF 是一款免费轻量的 PDF 阅读器，支持真正的静默打印。<br><br>' +
-    '您可以：</div>' +
+    'SumatraPDF 是一款免费轻量的 PDF 阅读器，支持静默打印。<br>' +
+    '<span style="font-size:12px;color:var(--text-muted)">手动下载后请将 exe 重命名为 SumatraPDF.exe，放到程序目录下的 tools 文件夹</span></div>' +
     '<div class="modal-actions" style="flex-direction:column;gap:8px">' +
-    '<button class="btn btn-primary" style="width:100%" onclick="downloadSumatraPdf()">自动下载到软件目录</button>' +
+    '<button class="btn btn-primary" style="width:100%" onclick="downloadSumatraPdf()">自动下载</button>' +
     '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://www.sumatrapdfreader.org/download-free-pdf-viewer\')">手动下载（官网）</button>' +
     '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>' +
     '</div>' +
@@ -227,6 +230,7 @@ var _sumatraDownloadAborted = false;
 
 function cancelSumatraDownload() {
   _sumatraDownloadAborted = true;
+  if (isTauri && invoke) { try { invoke('cancel_download'); } catch(e) {} }
   var modal = document.getElementById('sumatraPdfModal');
   if (modal) modal.classList.add('hidden');
   toast('下载已取消');
@@ -253,9 +257,117 @@ function showSumatraDownloadError(errMsg) {
 function switchToPdfMode() {
   document.getElementById('printMode').value = 'pdf';
   try { localStorage.setItem('fapiao-print-mode', 'pdf'); } catch(e) {}
-  var modal = document.getElementById('sumatraPdfModal');
-  if (modal) modal.classList.add('hidden');
+  var modal1 = document.getElementById('sumatraPdfModal');
+  if (modal1) modal1.classList.add('hidden');
+  var modal2 = document.getElementById('pdfiumModal');
+  if (modal2) modal2.classList.add('hidden');
   toast('已切换到 PDF 阅读器模式');
+}
+
+function showPdfiumMissing() {
+  var existing = document.getElementById('pdfiumModal');
+  if (existing) { existing.classList.remove('hidden'); return; }
+  var div = document.createElement('div');
+  div.id = 'pdfiumModal';
+  div.className = 'modal-bg';
+  div.innerHTML = '<div class="modal" onclick="event.stopPropagation()">' +
+    '<div class="modal-title">未检测到 pdfium.dll</div>' +
+    '<div class="modal-body" style="padding:8px 0;font-size:13px;line-height:1.6;color:var(--text-secondary)">' +
+    'PDFium 是 Chromium 内核的 PDF 渲染引擎，打印效果清晰。<br>' +
+    '<span style="font-size:12px;color:var(--text-muted)">手动下载后请将 pdfium.dll 放到程序目录下的 tools 文件夹</span></div>' +
+    '<div class="modal-actions" style="flex-direction:column;gap:8px">' +
+    '<button class="btn btn-primary" style="width:100%" onclick="downloadPdfiumDll()">自动下载（约 7MB）</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://github.com/bblanchon/pdfium-binaries/releases\')">手动下载（GitHub Releases）</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>' +
+    '</div>' +
+    '<div class="modal-actions" style="margin-top:8px;justify-content:flex-end">' +
+    '<button class="btn btn-sm" onclick="document.getElementById(\'pdfiumModal\').classList.add(\'hidden\')">取消</button>' +
+    '</div></div></div>';
+  div.onclick = function() { div.classList.add('hidden'); };
+  document.body.appendChild(div);
+}
+
+var _pdfiumDownloadAborted = false;
+
+async function downloadPdfiumDll() {
+  if (!isTauri || !invoke) return;
+  var modal = document.getElementById('pdfiumModal');
+  if (modal) {
+    var body = modal.querySelector('.modal-body');
+    var actions = modal.querySelectorAll('.modal-actions');
+    if (body) body.innerHTML = '<div style="text-align:center;padding:16px 0">' +
+      '<div class="spinner" style="width:40px;height:40px;border-width:3px;margin:0 auto 12px"></div>' +
+      '<div style="font-size:14px;color:var(--text-secondary);margin-bottom:10px">正在下载 pdfium.dll，请稍候...</div>' +
+      '<div style="width:100%;height:14px;background:var(--bg-secondary);border-radius:7px;overflow:hidden">' +
+        '<div id="pdfiumDownloadProgress" style="height:100%;width:0%;background:var(--accent);border-radius:7px;transition:width 0.2s"></div>' +
+      '</div>' +
+      '<div id="pdfiumDownloadPercent" style="font-size:13px;color:var(--text-muted);margin-top:6px">0%</div>' +
+    '</div>';
+    if (actions[0]) actions[0].innerHTML = '';
+    if (actions[1]) actions[1].innerHTML = '<button class="btn btn-sm" onclick="cancelPdfiumDownload()">取消下载</button>';
+    modal.classList.remove('hidden');
+  }
+  _pdfiumDownloadAborted = false;
+  var unlistenProgress = null;
+  try {
+    if (isTauri && window.__TAURI_INTERNALS__) {
+      var callbackId = window.__TAURI_INTERNALS__.transformCallback(function(evt) {
+        var progress = evt.payload;
+        var bar = document.getElementById('pdfiumDownloadProgress');
+        var percent = document.getElementById('pdfiumDownloadPercent');
+        if (bar) bar.style.width = Math.min(100, progress.percent).toFixed(0) + '%';
+        if (percent) percent.textContent = Math.min(100, progress.percent).toFixed(0) + '%';
+      });
+      var eventId = await invoke('plugin:event|listen', {
+        event: 'pdfium-download-progress',
+        target: { kind: 'Any' },
+        handler: callbackId
+      });
+      unlistenProgress = function() {
+        try { invoke('plugin:event|unlisten', { event: 'pdfium-download-progress', eventId: eventId }); } catch(e) {}
+      };
+    }
+    var result = await invoke('download_pdfium_dll');
+    if (unlistenProgress) unlistenProgress();
+    if (_pdfiumDownloadAborted) return;
+    if (modal) modal.classList.add('hidden');
+    if (result.success) {
+      toast('\u2705 ' + result.message);
+    } else {
+      showPdfiumDownloadError(result.message);
+    }
+  } catch(e) {
+    if (unlistenProgress) unlistenProgress();
+    if (_pdfiumDownloadAborted) return;
+    if (modal) modal.classList.add('hidden');
+    showPdfiumDownloadError(String(e));
+  }
+}
+
+function cancelPdfiumDownload() {
+  _pdfiumDownloadAborted = true;
+  if (isTauri && invoke) { try { invoke('cancel_download'); } catch(e) {} }
+  var modal = document.getElementById('pdfiumModal');
+  if (modal) modal.classList.add('hidden');
+  toast('下载已取消');
+}
+
+function showPdfiumDownloadError(errMsg) {
+  var modal = document.getElementById('pdfiumModal');
+  if (!modal) { showPdfiumMissing(); modal = document.getElementById('pdfiumModal'); }
+  if (!modal) return;
+  var body = modal.querySelector('.modal-body');
+  var actions = modal.querySelectorAll('.modal-actions');
+  if (body) body.innerHTML = '<div style="padding:12px 16px;background:var(--danger-light);border-radius:8px;border-left:4px solid var(--danger);margin-bottom:4px">' +
+    '<div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:6px">\u274c 下载失败</div>' +
+    '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);word-break:break-all">' + escHtml(errMsg) + '</div>' +
+  '</div>';
+  if (actions[0]) actions[0].innerHTML =
+    '<button class="btn btn-primary" style="width:100%" onclick="downloadPdfiumDll()">重试下载</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://github.com/bblanchon/pdfium-binaries/releases\')">手动下载（GitHub Releases）</button>' +
+    '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>';
+  if (actions[1]) actions[1].innerHTML = '<button class="btn btn-sm" onclick="document.getElementById(\'pdfiumModal\').classList.add(\'hidden\')">关闭</button>';
+  modal.classList.remove('hidden');
 }
 
 // Convert data URL to Uint8Array
@@ -2089,10 +2201,9 @@ document.getElementById('orientation').value = 'landscape';
 (function() {
   try {
     var pm = localStorage.getItem('fapiao-print-mode');
-    if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdf')) {
+    if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdfium' || pm === 'pdf')) {
       document.getElementById('printMode').value = pm;
     } else {
-      // Default to PDF reader mode for better print quality
       document.getElementById('printMode').value = 'pdf';
     }
   } catch(e) {}
