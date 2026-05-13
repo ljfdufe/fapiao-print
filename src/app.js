@@ -431,11 +431,12 @@ async function triggerUpload() {
 
       // Incremental loading: read + render one file at a time for instant visual feedback
       if (paths.length <= 3) {
-        // Few files: batch read is fast, use original flow
         toastLoading('读取 ' + paths.length + ' 个文件...');
         var fileDataList = await invoke('open_invoice_files', { paths: paths });
         if (fileDataList && fileDataList.length > 0) {
           await processFileDataList(fileDataList);
+        } else {
+          toast('无法读取所选文件');
         }
       } else {
         // Many files: incremental — read one by one so first preview appears immediately
@@ -552,7 +553,7 @@ async function processFileDataList(fileDataList) {
     _ocrToastActive = false;
     _ocrBatchTotal = 0;
     _ocrBatchAddedCount = 0;
-    toastDone('已加载 ' + added + ' 张发票');
+    toastDone(added > 0 ? '已加载 ' + added + ' 张发票' : '文件加载失败');
   } else {
     // OCR still running — save added count for _drainOcrQueue's final toast
     _ocrBatchAddedCount = added;
@@ -646,14 +647,12 @@ async function processFiles(files) {
   // Loading batch complete
   _loadingBatchActive = false;
 
-  // If no OCR queued, dismiss toast now
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
     _ocrBatchTotal = 0;
     _ocrBatchAddedCount = 0;
-    toastDone('已加载 ' + added + ' 张发票');
+    toastDone(added > 0 ? '已加载 ' + added + ' 张发票' : '文件加载失败');
   } else {
-    // OCR still running — save added count for _drainOcrQueue's final toast
     _ocrBatchAddedCount = added;
   }
 }
@@ -781,7 +780,7 @@ async function processFilesIncremental(paths) {
     _ocrToastActive = false;
     _ocrBatchTotal = 0;
     _ocrBatchAddedCount = 0;
-    toastDone('已加载 ' + added + ' 张发票');
+    toastDone(added > 0 ? '已加载 ' + added + ' 张发票' : '文件加载失败');
   } else {
     _ocrBatchAddedCount = added;
   }
@@ -1165,6 +1164,7 @@ function loadFileFromDataUrlFast(fd) {
       resolve(null);
     }
     else {
+      if (!dataUrl) { resolve(null); return; }
       var img = new Image(); img.src = dataUrl;
       img.onload = function() {
         var result = createFileObj({
@@ -2135,7 +2135,11 @@ window.addEventListener('beforeunload', function() {
 
 // Tauri drag & drop — Rust calls window._tauriFileDrop(paths) via eval()
 window._tauriFileDrop = function(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return;
+  if (!Array.isArray(paths)) return;
+  if (paths.length === 0) {
+    toast('不支持的文件格式，请拖入 PDF/JPG/PNG/OFD 等发票文件');
+    return;
+  }
   (async function() {
     try {
       if (paths.length <= 3) {
@@ -2143,6 +2147,8 @@ window._tauriFileDrop = function(paths) {
         var fileDataList = await invoke('open_invoice_files', { paths: paths });
         if (fileDataList && fileDataList.length > 0) {
           await processFileDataList(fileDataList);
+        } else {
+          toast('无法读取拖放的文件');
         }
       } else {
         await processFilesIncremental(paths);

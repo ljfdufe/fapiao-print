@@ -1069,11 +1069,9 @@ pub fn run() {
                                         if valid_ext { Some(p.to_string_lossy().to_string()) } else { None }
                                     })
                                     .collect();
-                                if !valid.is_empty() {
-                                    let json = serde_json::to_string(&valid).unwrap_or_default();
-                                    let js = format!("if(window._tauriFileDrop)window._tauriFileDrop({})", json);
-                                    let _ = win.eval(&js);
-                                }
+                                let json = serde_json::to_string(&valid).unwrap_or_default();
+                                let js = format!("if(window._tauriFileDrop)window._tauriFileDrop({})", json);
+                                let _ = win.eval(&js);
                             }
                         }
                         _ => {}
