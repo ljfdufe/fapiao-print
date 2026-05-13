@@ -178,7 +178,6 @@ npm run bump 1.9.8   # 同步 package.json → Cargo.toml → tauri.conf.json
 - [x] EXIF 方向 / PDF Rotate / CropBox 归一化自动修正
 - [x] OFD 自闭合标签解析修复 + 字段级联保护
 - [x] OFD ImageMask 遮罩兼容（iloveofd 等二次转换 OFD 红章黑色背景修复）
-~~❌️ 低版本系统支持（Windows 7/8）~~
 
 ## 🤖 关于此项目
 
