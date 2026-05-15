@@ -401,6 +401,72 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
     Ok(results)
 }
 
+pub(crate) fn render_pdf_pages_pdfium(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedPage>, String> {
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("应用正在关闭".to_string());
+    }
+
+    if crate::pdfium_print::find_pdfium_dll().is_none() {
+        return Err("pdfium.dll 不可用，无法使用 PDFium 渲染".to_string());
+    }
+
+    let pdf_bytes = std::fs::read(pdf_path)
+        .map_err(|e| format!("读取PDF文件失败: {}", e))?;
+
+    let images = crate::pdfium_print::render_pdf_to_images(&pdf_bytes, dpi)?;
+
+    let results: Vec<RenderedPage> = images.into_iter().map(|img| RenderedPage {
+        index: img.index,
+        image_data_url: img.image_data_url,
+        width: img.width,
+        height: img.height,
+        render_dpi: img.render_dpi,
+    }).collect();
+
+    Ok(results)
+}
+
+pub(crate) fn check_winrt_pdf_available() -> bool {
+    use windows::core::HSTRING;
+    use windows::Storage::StorageFile;
+
+    let _com = ComGuard::init();
+
+    let test_path = std::env::temp_dir().join("_fapiao_winrt_pdf_test.pdf");
+    let test_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF";
+    if std::fs::write(&test_path, test_content).is_err() {
+        log::warn!("WinRT PDF check: cannot write test file");
+        return false;
+    }
+
+    let path_h = HSTRING::from(test_path.to_string_lossy().as_ref());
+    let result = (|| -> Result<(), String> {
+        let file = StorageFile::GetFileFromPathAsync(&path_h)
+            .map_err(|e| format!("{}", e))?
+            .get()
+            .map_err(|e| format!("{}", e))?;
+        let doc = windows::Data::Pdf::PdfDocument::LoadFromFileAsync(&file)
+            .map_err(|e| format!("{}", e))?
+            .get()
+            .map_err(|e| format!("{}", e))?;
+        let _ = doc.PageCount().map_err(|e| format!("{}", e))?;
+        Ok(())
+    })();
+
+    let _ = std::fs::remove_file(&test_path);
+
+    match result {
+        Ok(()) => {
+            log::info!("WinRT PDF component: available");
+            true
+        }
+        Err(e) => {
+            log::warn!("WinRT PDF component: NOT available ({})", e);
+            false
+        }
+    }
+}
+
 /// Render a single PDF page and run OCR on it — zero IPC round-trip for OCR.
 /// The frontend calls this instead of `render_pdf_pages` + `ocr_image` to avoid:
 ///   Rust render → base64 → IPC → frontend → downsample → base64 → IPC → Rust decode → OCR

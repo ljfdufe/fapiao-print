@@ -139,6 +139,20 @@ fn render_pdf_pages(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedPa
     pdf_engine::render_pdf_pages(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI))
 }
 
+#[command]
+fn render_pdf_pages_pdfium(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedPage>, String> {
+    use std::sync::atomic::Ordering;
+    if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("应用正在关闭".to_string());
+    }
+    pdf_engine::render_pdf_pages_pdfium(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI))
+}
+
+#[command]
+fn check_winrt_pdf() -> bool {
+    pdf_engine::check_winrt_pdf_available()
+}
+
 /// Render PDF pages AND run OCR in one pass — avoids IPC round-trip.
 /// Returns preview images + OCR results together.
 #[cfg(feature = "ocr")]
@@ -1087,6 +1101,8 @@ pub fn run() {
         open_invoice_files,
         get_printers,
         render_pdf_pages,
+        render_pdf_pages_pdfium,
+        check_winrt_pdf,
         render_and_ocr_pdf,
         open_url,
         open_file,
@@ -1118,6 +1134,8 @@ pub fn run() {
         open_invoice_files,
         get_printers,
         render_pdf_pages,
+        render_pdf_pages_pdfium,
+        check_winrt_pdf,
         open_url,
         open_file,
         check_ocr_available,

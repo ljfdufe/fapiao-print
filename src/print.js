@@ -289,7 +289,7 @@ async function doPdfiumPrint(files, s) {
     try {
       var available = await invoke('check_pdfium_available');
       if (!available) {
-        showPdfiumMissing();
+        showPdfiumMissing('PDFium 打印引擎需要 pdfium.dll 才能工作。');
         return;
       }
     } catch(e) {

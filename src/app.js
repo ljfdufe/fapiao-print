@@ -10,6 +10,7 @@ var hasOcr  = false; // Set to true at startup if OCR feature is available
 var APP_VERSION = ''; // Filled at startup from Rust get_app_version()
 var _pdfDirty = true; // PDF dirty flag (needs regeneration)
 var _lastPdfPath = null; // Last generated PDF path for reuse
+var _winrtPdfAvailable = true; // Set to false at startup if WinRT PDF component is missing
 
 // =====================================================
 // Constants
@@ -264,21 +265,24 @@ function switchToPdfMode() {
   toast('已切换到 PDF 阅读器模式');
 }
 
-function showPdfiumMissing() {
+function showPdfiumMissing(reason) {
   var existing = document.getElementById('pdfiumModal');
   if (existing) { existing.classList.remove('hidden'); return; }
+  var reasonHtml = reason
+    ? '<div style="padding:10px 14px;background:var(--warning-light, #fff8e1);border-radius:8px;border-left:4px solid var(--warning, #f59e0b);margin-bottom:8px;font-size:13px;line-height:1.5;color:var(--text-secondary)">' + escHtml(reason) + '</div>'
+    : '';
   var div = document.createElement('div');
   div.id = 'pdfiumModal';
   div.className = 'modal-bg';
   div.innerHTML = '<div class="modal" onclick="event.stopPropagation()">' +
-    '<div class="modal-title">未检测到 pdfium.dll</div>' +
+    '<div class="modal-title">需要下载 PDF 渲染组件</div>' +
     '<div class="modal-body" style="padding:8px 0;font-size:13px;line-height:1.6;color:var(--text-secondary)">' +
-    'PDFium 是 Chromium 内核的 PDF 渲染引擎，打印效果清晰。<br>' +
-    '<span style="font-size:12px;color:var(--text-muted)">手动下载后请将 pdfium.dll 放到程序目录下的 tools 文件夹</span></div>' +
+    reasonHtml +
+    'PDFium 是 Chromium 内核的 PDF 渲染引擎，用于加载和预览 PDF 发票。<br>' +
+    '<span style="font-size:12px;color:var(--text-muted)">下载后自动生效，无需重启。也可手动将 pdfium.dll 放到程序目录下的 tools 文件夹</span></div>' +
     '<div class="modal-actions" style="flex-direction:column;gap:8px">' +
     '<button class="btn btn-primary" style="width:100%" onclick="downloadPdfiumDll()">自动下载（约 7MB）</button>' +
     '<button class="btn btn-sm" style="width:100%" onclick="openExternal(\'https://github.com/bblanchon/pdfium-binaries/releases\')">手动下载（GitHub Releases）</button>' +
-    '<button class="btn btn-sm" style="width:100%" onclick="switchToPdfMode()">切换到「PDF阅读器」模式</button>' +
     '</div>' +
     '<div class="modal-actions" style="margin-top:8px;justify-content:flex-end">' +
     '<button class="btn btn-sm" onclick="document.getElementById(\'pdfiumModal\').classList.add(\'hidden\')">取消</button>' +
@@ -332,7 +336,7 @@ async function downloadPdfiumDll() {
     if (_pdfiumDownloadAborted) return;
     if (modal) modal.classList.add('hidden');
     if (result.success) {
-      toast('\u2705 ' + result.message);
+      toast('\u2705 ' + result.message + '，请重新添加 PDF 文件');
     } else {
       showPdfiumDownloadError(result.message);
     }
@@ -354,7 +358,7 @@ function cancelPdfiumDownload() {
 
 function showPdfiumDownloadError(errMsg) {
   var modal = document.getElementById('pdfiumModal');
-  if (!modal) { showPdfiumMissing(); modal = document.getElementById('pdfiumModal'); }
+  if (!modal) { showPdfiumMissing('下载失败，请重试。'); modal = document.getElementById('pdfiumModal'); }
   if (!modal) return;
   var body = modal.querySelector('.modal-body');
   var actions = modal.querySelectorAll('.modal-actions');
@@ -1039,9 +1043,9 @@ function loadFileFromDataUrlFast(fd) {
 
     if (ext === 'pdf') {
       if (isTauri && invoke && filePath) {
-        // Render PDF pages only (fast, no OCR) — preview appears immediately.
-        // OCR runs in background queue, so the user sees previews right away.
-        invoke('render_pdf_pages', { pdfPath: filePath, dpi: PDF_RENDER_DPI }).then(async function(pages) {
+        var renderFn = _winrtPdfAvailable ? 'render_pdf_pages' : 'render_pdf_pages_pdfium';
+        var renderLabel = _winrtPdfAvailable ? 'WinRT' : 'PDFium';
+        invoke(renderFn, { pdfPath: filePath, dpi: PDF_RENDER_DPI }).then(async function(pages) {
           if (pages && pages.length > 0) {
             var results = [];
             for (var p = 0; p < pages.length; p++) {
@@ -1088,9 +1092,70 @@ function loadFileFromDataUrlFast(fd) {
           toast('PDF 渲染结果为空: ' + name);
           resolve(null);
         }).catch(function(err) {
-          console.error('[PDF] WinRT rendering failed:', err);
-          toast('PDF 渲染失败: ' + name);
-          resolve(null);
+          console.error('[PDF] ' + renderLabel + ' rendering failed:', err);
+          if (renderFn === 'render_pdf_pages') {
+            _winrtPdfAvailable = false;
+            console.warn('[PDF] WinRT failed, trying PDFium fallback...');
+            invoke('render_pdf_pages_pdfium', { pdfPath: filePath, dpi: PDF_RENDER_DPI }).then(async function(pages2) {
+              if (pages2 && pages2.length > 0) {
+                var results2 = [];
+                for (var p2 = 0; p2 < pages2.length; p2++) {
+                  var pg2 = pages2[p2];
+                  var img2 = new Image(); img2.src = pg2.imageDataUrl;
+                  await new Promise(function(r) { img2.onload = r; });
+                  var fileObj2 = createFileObj({
+                    id: id + '_p' + (p2 + 1),
+                    name: pages2.length > 1 ? name.replace(/\.pdf$/i, '') + '_第' + (p2 + 1) + '页.pdf' : name,
+                    size: size, type: 'pdf', previewUrl: pg2.imageDataUrl,
+                    img: img2, renderDpi: pg2.renderDpi || PDF_RENDER_DPI,
+                    pdfPath: filePath, pdfPageIdx: p2
+                  });
+                  results2.push(fileObj2);
+                }
+                resolve(results2.length === 1 ? results2[0] : results2);
+                if (S.feat.pdfTextEnabled) {
+                  results2.forEach(function(r) {
+                    invoke('extract_pdf_text', {
+                      pdfPath: r._pdfPath, pageIdx: r._pdfPageIdx
+                    }).then(function(pdfText) {
+                      if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+                        applyPdfTextResult(r, pdfText);
+                        updateFileItem(r);
+                        updateAmountSummary();
+                      } else if (hasOcr && S.feat.ocrEnabled) {
+                        applyOcrAsync(r, r.previewUrl);
+                      }
+                    }).catch(function() {
+                      if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                    });
+                  });
+                }
+                results2.forEach(function(r) {
+                  if (S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                });
+                return;
+              }
+              toast('PDF 渲染失败: ' + name);
+              resolve(null);
+            }).catch(function(err2) {
+              console.error('[PDF] PDFium fallback also failed:', err2);
+              var errMsg = String(err2 || '');
+              if (errMsg.indexOf('pdfium.dll') >= 0 || errMsg.indexOf('不可用') >= 0) {
+                showPdfiumMissing('当前系统的 PDF 组件不可用，需要下载 PDFium 渲染引擎才能加载 PDF 文件。');
+              } else {
+                toast('PDF 渲染失败: ' + name);
+              }
+              resolve(null);
+            });
+          } else {
+            var errMsg2 = String(err || '');
+            if (errMsg2.indexOf('pdfium.dll') >= 0 || errMsg2.indexOf('不可用') >= 0) {
+              showPdfiumMissing('当前系统的 PDF 组件不可用，需要下载 PDFium 渲染引擎才能加载 PDF 文件。');
+            } else {
+              toast('PDF 渲染失败: ' + name);
+            }
+            resolve(null);
+          }
         });
         return;
       }
@@ -2273,6 +2338,17 @@ document.getElementById('orientation').value = 'landscape';
           if (ocrAllBtn) ocrAllBtn.style.display = 'none';
           var ocrSection = document.getElementById('ocrSection');
           if (ocrSection) ocrSection.style.display = 'none';
+        }
+      }).catch(function() {});
+      invoke('check_winrt_pdf').then(function(available) {
+        _winrtPdfAvailable = !!available;
+        if (!_winrtPdfAvailable) {
+          console.warn('[PDF] WinRT PDF 组件不可用，将使用 PDFium fallback');
+          invoke('check_pdfium_available').then(function(pdfiumAvail) {
+            if (!pdfiumAvail) {
+              showPdfiumMissing('当前系统的 PDF 组件不可用，需要下载 PDFium 渲染引擎才能加载 PDF 文件。');
+            }
+          }).catch(function() {});
         }
       }).catch(function() {});
       // Get app version from Rust (compiled from Cargo.toml)

@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v1.9.9
+- **版本**: v1.10.0
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -35,6 +35,16 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - `generate_pdf_from_layout()` 入口
 - lopdf 直通: `can_passthrough_pdf()` 判断 → `extract_page_as_form_xobject()` → JPEG DCTDecode 嵌入
 - 打印四模式: PDF阅读器模式(默认) / 弹窗确认 / 静默打印PDFium(推荐) / 静默打印SumatraPDF
+
+### PDF 渲染双引擎 (v1.9.10+)
+
+首选 **WinRT PDF**（系统组件）→ 失败时自动回退 **PDFium 渲染**
+
+- 启动检测: `check_winrt_pdf_available()` 创建临时 PDF 测试 WinRT `PdfDocument` API
+- WinRT 渲染: `render_pdf_pages()` — `windows::Data::Pdf::PdfDocument` + `StorageFile`
+- PDFium 渲染: `render_pdf_pages_pdfium()` — `FPDF_LoadMemDocument` + `FPDF_RenderPageBitmap` → PNG
+- 前端 fallback 链: `_winrtPdfAvailable` 标志 → WinRT 失败自动切换 PDFium
+- PDFium 位图渲染: `pdfium_print::render_pdf_to_images()` — BGRA→RGBA 转换 + PNG 编码
 
 ### 发票字段提取
 

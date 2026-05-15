@@ -1,5 +1,32 @@
 # 📋 更新日志
 
+## v1.10.0 — PDF 渲染双引擎 + WinRT fallback
+
+### 🚀 新功能
+
+- **PDF 渲染双引擎**：新增 PDFium 渲染 fallback，解决部分电脑（企业精简版/LTSC）WinRT PDF 组件不可用导致 PDF 文件加载失败的问题
+  - 启动检测 `check_winrt_pdf_available()`：创建临时 PDF 测试 WinRT `PdfDocument` API 可用性
+  - PDFium 位图渲染 `render_pdf_pages_pdfium()`：`FPDF_LoadMemDocument` + `FPDF_RenderPageBitmap` → BGRA→RGBA → PNG
+  - 前端 fallback 链：`_winrtPdfAvailable` 标志控制，WinRT 失败自动切换 PDFium，后续直接走 PDFium
+  - `pdfium_print.rs` 扩展位图 API：`FPDFBitmap_Create` / `FPDFBitmap_FillRect` / `FPDF_RenderPageBitmap` / `FPDFBitmap_GetBuffer` / `FPDFBitmap_GetStride` / `FPDFBitmap_Destroy`
+- **PDFium DLL 下载提示优化**：区分"PDF 预览"和"打印"场景的提示文案，启动时 WinRT 不可用 + DLL 不存在自动弹出下载提示
+  - `showPdfiumMissing(reason)` 支持自定义原因文案，黄色警告框突出显示
+  - 下载成功后提示"请重新添加 PDF 文件"
+  - 打印场景专用提示："PDFium 打印引擎需要 pdfium.dll 才能工作。"
+
+### 🐛 修复
+
+- **PDF 文件加载失败**（部分电脑）：WinRT `PdfDocument` API 在企业精简版/LTSC 系统上不可用时，PDF 文件无法渲染预览，图片文件正常。现自动 fallback 到 PDFium 渲染引擎
+- **Alpha 通道处理不安全**：`FPDFBitmap_Create(alpha=0)` 第 4 字节未定义，强制 alpha=255 避免垃圾值
+
+### 🔧 优化
+
+- **错误路径资源泄漏防护**：PDFium 渲染失败时 `close_document` 改为 `let _ =` 避免吞掉原始错误
+- **错误信息精确匹配**：DLL 缺失提示仅匹配 `pdfium.dll` 和 `不可用` 关键词，不再误匹配 PDF 文件损坏错误
+- **cfg 条件简化**：移除冗余 `#[cfg(target_os = "windows")]`（项目 Windows-only）
+
+---
+
 ## v1.9.8 — PDFium 矢量打印 + XPS 清理 + 打印体验优化
 
 ### 🚀 新功能
