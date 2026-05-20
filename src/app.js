@@ -1685,6 +1685,7 @@ function setLayout(c, r, el) {
   syncToolbarHighlight(c, r);
   document.getElementById('customRows').value = r;
   document.getElementById('customCols').value = c;
+  saveSettings();
   updatePreview();
 }
 function quickLayout(c, r) {
@@ -1735,6 +1736,7 @@ function toggleFeature(k, btn) {
   if (k === 'footer') {
     document.getElementById('footerOpts').style.display = S.feat[k] ? 'block' : 'none';
   }
+  saveSettings();
   updatePreview();
 }
 function setLayoutPreset(c, r, orient, el) {
@@ -1746,6 +1748,7 @@ function setLayoutPreset(c, r, orient, el) {
   syncToolbarHighlight(c, r);
   document.getElementById('customRows').value = r;
   document.getElementById('customCols').value = c;
+  saveSettings();
   updatePreview();
 }
 function applyCustomLayout() {
@@ -1761,6 +1764,7 @@ function applyCustomLayout() {
     if (parseInt(e.dataset.cols) === c && parseInt(e.dataset.rows) === r) e.classList.add('active');
   });
   syncToolbarHighlight(c, r);
+  saveSettings();
   updatePreview();
 }
 function showCustomLayoutModal() {
@@ -1903,8 +1907,11 @@ function buildPages(files, settings) {
 // =====================================================
 // Preview & Navigation
 // =====================================================
+var _saveTimer = null;
 function updatePreview() {
   _pdfDirty = true;
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveSettings, 500);
   var files = getActiveFiles();
   document.getElementById('stFiles').textContent = S.files.filter(function(f) { return f.checked; }).length + ' 张';
   document.getElementById('stLayout').textContent = S.layout.rows + '\u00D7' + S.layout.cols;
@@ -1927,7 +1934,6 @@ function updatePreview() {
   renderPage(pages[S.currentPage], S.currentPage, pages.length, settings);
   updatePageDots(pages.length);
   syncActiveFileFromPage();
-  // Sync per-slot adjustment panel
   if (typeof updateAdjPanel === 'function') updateAdjPanel();
 }
 
@@ -2005,6 +2011,125 @@ function updatePrintBtn() { document.getElementById('printBtn').disabled = !S.fi
 // =====================================================
 // Save settings & Preferences
 // =====================================================
+function saveSettings() {
+  var o = {
+    layout: { cols: S.layout.cols, rows: S.layout.rows },
+    paperSize: document.getElementById('paperSize').value,
+    orientation: document.getElementById('orientation').value,
+    customW: document.getElementById('customW').value,
+    customH: document.getElementById('customH').value,
+    marginTop: document.getElementById('marginTop').value,
+    marginBottom: document.getElementById('marginBottom').value,
+    marginLeft: document.getElementById('marginLeft').value,
+    marginRight: document.getElementById('marginRight').value,
+    gapH: document.getElementById('gapH').value,
+    gapV: document.getElementById('gapV').value,
+    fitMode: document.getElementById('fitMode').value,
+    customScale: document.getElementById('customScale').value,
+    globalRotation: document.getElementById('globalRotation').value,
+    copies: document.getElementById('copies').value,
+    colorMode: document.getElementById('colorMode').value,
+    pageOrder: document.getElementById('pageOrder').value,
+    printMode: document.getElementById('printMode').value,
+    feat: {}
+  };
+  var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM'];
+  featKeys.forEach(function(k) { o.feat[k] = S.feat[k]; });
+  if (S.feat.watermark) {
+    o.wmText = document.getElementById('wmText').value;
+    o.wmOpacity = document.getElementById('wmOpacity').value;
+    o.wmColor = document.getElementById('wmColor').value;
+    o.wmAngle = document.getElementById('wmAngle').value;
+    o.wmSize = document.getElementById('wmSize').value;
+  }
+  if (S.feat.footer) {
+    o.footerText = document.getElementById('footerText').value;
+  }
+  if (S.feat.customFM || S.feat.pageNum || S.feat.printDate || S.feat.footer) {
+    o.footerMargin = document.getElementById('footerMargin').value;
+  }
+  try { localStorage.setItem('fapiao-settings', JSON.stringify(o)); } catch(e) {}
+}
+
+function loadSettings() {
+  var raw;
+  try { raw = localStorage.getItem('fapiao-settings'); } catch(e) { return; }
+  if (!raw) return;
+  var o;
+  try { o = JSON.parse(raw); } catch(e) { return; }
+  if (o.layout) {
+    S.layout = { cols: o.layout.cols || 1, rows: o.layout.rows || 1 };
+    document.getElementById('customRows').value = S.layout.rows;
+    document.getElementById('customCols').value = S.layout.cols;
+    document.querySelectorAll('.go').forEach(function(e) {
+      e.classList.remove('active');
+      if (parseInt(e.dataset.cols) === S.layout.cols && parseInt(e.dataset.rows) === S.layout.rows) e.classList.add('active');
+    });
+    syncToolbarHighlight(S.layout.cols, S.layout.rows);
+  }
+  if (o.paperSize) { document.getElementById('paperSize').value = o.paperSize; onPaperChange(); }
+  if (o.orientation) document.getElementById('orientation').value = o.orientation;
+  if (o.customW) document.getElementById('customW').value = o.customW;
+  if (o.customH) document.getElementById('customH').value = o.customH;
+  var sliders = ['marginTop','marginBottom','marginLeft','marginRight','gapH','gapV','customScale'];
+  sliders.forEach(function(id) {
+    if (o[id] != null) {
+      document.getElementById(id).value = o[id];
+      var nId = id + 'N';
+      var nEl = document.getElementById(nId);
+      if (nEl) nEl.value = o[id];
+    }
+  });
+  if (o.fitMode) { document.getElementById('fitMode').value = o.fitMode; onFitChange(); }
+  if (o.globalRotation) document.getElementById('globalRotation').value = o.globalRotation;
+  if (o.copies) document.getElementById('copies').value = o.copies;
+  if (o.colorMode) document.getElementById('colorMode').value = o.colorMode;
+  if (o.pageOrder) document.getElementById('pageOrder').value = o.pageOrder;
+  if (o.printMode) document.getElementById('printMode').value = o.printMode;
+  if (o.feat) {
+    var featMap = {
+      cutline: 'toggleCutline', number: 'toggleNumber', border: 'toggleBorder',
+      trimWhite: 'toggleTrimWhite', watermark: 'toggleWatermark', collate: 'toggleCollate',
+      duplex: 'toggleDuplex', pageNum: 'togglePageNum', printDate: 'toggleDate',
+      footer: 'toggleFooter', autoOpenPdf: 'toggleAutoOpenPdf', customFM: 'toggleCustomFM'
+    };
+    Object.keys(featMap).forEach(function(k) {
+      if (o.feat[k] != null) {
+        S.feat[k] = o.feat[k];
+        var btn = document.getElementById(featMap[k]);
+        if (btn) btn.classList.toggle('on', S.feat[k]);
+      }
+    });
+    if (S.feat.watermark) {
+      document.getElementById('wmOpts').style.display = 'block';
+      if (o.wmText != null) document.getElementById('wmText').value = o.wmText;
+      if (o.wmOpacity != null) { document.getElementById('wmOpacity').value = o.wmOpacity; document.getElementById('wmOpacityN').value = o.wmOpacity; }
+      if (o.wmColor) document.getElementById('wmColor').value = o.wmColor;
+      if (o.wmAngle != null) { document.getElementById('wmAngle').value = o.wmAngle; document.getElementById('wmAngleN').value = o.wmAngle; }
+      if (o.wmSize != null) { document.getElementById('wmSize').value = o.wmSize; document.getElementById('wmSizeN').value = o.wmSize; }
+    }
+    if (S.feat.footer) {
+      document.getElementById('footerOpts').style.display = 'block';
+      if (o.footerText != null) document.getElementById('footerText').value = o.footerText;
+    }
+    var lineCount = (S.feat.pageNum || S.feat.printDate ? 1 : 0) + (S.feat.footer ? 1 : 0);
+    if (S.feat.customFM && lineCount > 0) {
+      document.getElementById('customFMRow').style.display = 'flex';
+      if (o.footerMargin != null) {
+        document.getElementById('footerMargin').value = o.footerMargin;
+        document.getElementById('footerMarginN').value = o.footerMargin;
+      }
+      document.getElementById('footerMarginRow').style.display = 'flex';
+    } else if (lineCount > 0) {
+      document.getElementById('customFMRow').style.display = 'flex';
+      if (o.footerMargin != null) {
+        document.getElementById('footerMargin').value = o.footerMargin;
+        document.getElementById('footerMarginN').value = o.footerMargin;
+      }
+    }
+  }
+}
+
 function togglePref(k, btn) {
   S.feat[k] = !S.feat[k];
   btn.classList.toggle('on', S.feat[k]);
@@ -2120,6 +2245,7 @@ function resetSettings() {
   try { localStorage.removeItem('fapiao-ocr-enabled'); } catch(e) {}
   try { localStorage.removeItem('fapiao-ocr-precision'); } catch(e) {}
   try { localStorage.removeItem('fapiao-pdf-text-enabled'); } catch(e) {}
+  try { localStorage.removeItem('fapiao-settings'); } catch(e) {}
   document.getElementById('saveDir').value = '';
   document.getElementById('amtMode').value = 'tax';
   S.amtMode = 'tax';
@@ -2322,6 +2448,9 @@ document.getElementById('orientation').value = 'landscape';
     }
   } catch(e) {}
 })();
+
+// Restore all layout & feature settings
+loadSettings();
 
 // =====================================================
 // Show main window after DOM is ready (window starts hidden via visible:false)
