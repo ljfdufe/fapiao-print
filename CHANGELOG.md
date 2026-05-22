@@ -1,5 +1,15 @@
 # 📋 更新日志
 
+## v1.10.2 — 打印兼容性修复
+
+### 🐛 修复
+
+- **PDF阅读器模式打印报错（错误码31）**：PDF-XChange Editor 等第三方阅读器未注册 `printto`/`print` Shell 动词时，`ShellExecuteW` 返回 SE_ERR_NOASSOC(31)。现增加 Strategy 3 fallback：自动回退 `ShellExecuteW("open")` 打开 PDF，提示用户手动打印
+- **PDFium/弹窗确认模式打印机有声音但不进纸**：`build_dev_mode()` 从零构建 DEVMODE 缺少打印机驱动默认配置（纸盒选择、纸张来源等），导致 HP 等网络打印机无法正确匹配纸盒。现通过 `DocumentPropertiesW` API 获取打印机默认 DEVMODE 作为基础配置，再覆盖自定义字段
+- **打印机 DC 无效尺寸防御**：`GetDeviceCaps` 返回 HORZRES/VERTRES/LOGPIXELSX ≤ 0 时提前报错，避免空页打印
+
+---
+
 ## v1.10.1 — 设置持久化
 
 ### 🚀 新功能
