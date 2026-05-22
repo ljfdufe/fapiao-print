@@ -360,7 +360,19 @@ pub fn pdfium_vector_print(
     })?;
 
     let printer_name_w: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
-    let dev_mode = build_dev_mode(copies, duplex, color_mode, paper_w_mm, paper_h_mm)?;
+
+    let base_devmode = match get_printer_default_devmode(printer_name) {
+        Ok(dm) => {
+            log::info!("Using printer default DEVMODE as base");
+            Some(dm)
+        }
+        Err(e) => {
+            log::warn!("Failed to get printer default DEVMODE ({}), using blank", e);
+            None
+        }
+    };
+
+    let dev_mode = build_dev_mode(base_devmode, copies, duplex, color_mode, paper_w_mm, paper_h_mm)?;
 
     let hdc = unsafe {
         CreateDCW(
@@ -384,6 +396,15 @@ pub fn pdfium_vector_print(
     let printer_h = unsafe { GetDeviceCaps(print_dc, VERTRES) };
     let printer_dpi = unsafe { GetDeviceCaps(print_dc, LOGPIXELSX) };
     log::info!("Printer DC: {}x{} px, {} DPI", printer_w, printer_h, printer_dpi);
+
+    if printer_w <= 0 || printer_h <= 0 || printer_dpi <= 0 {
+        unsafe { let _ = DeleteDC(print_dc); }
+        with_pdfium(|funcs| { unsafe { (funcs.close_document)(doc); } Ok(()) })?;
+        return Err(format!(
+            "打印机DC返回无效尺寸 ({}x{} px, {} DPI)，请检查打印机设置和纸张配置",
+            printer_w, printer_h, printer_dpi
+        ));
+    }
 
     let doc_name_w: Vec<u16> = "发票打印".encode_utf16().chain(std::iter::once(0)).collect();
     let doc_info = DOCINFOW {
@@ -484,15 +505,89 @@ pub fn pdfium_vector_print(
     })
 }
 
+fn get_printer_default_devmode(printer_name: &str) -> Result<DEVMODEW, String> {
+    use windows::Win32::Graphics::Printing::{OpenPrinterW, ClosePrinter, DocumentPropertiesW, PRINTER_DEFAULTSW};
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::core::PWSTR;
+
+    let printer_name_w: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let defaults = PRINTER_DEFAULTSW {
+            pDatatype: PWSTR::null(),
+            pDevMode: std::ptr::null_mut(),
+            DesiredAccess: windows::Win32::Graphics::Printing::PRINTER_ACCESS_USE,
+        };
+        let mut hprinter = HANDLE::default();
+
+        OpenPrinterW(
+            PCWSTR(printer_name_w.as_ptr()),
+            &mut hprinter,
+            Some(&defaults),
+        )
+        .map_err(|e| format!("无法打开打印机: {}", e))?;
+
+        let null_hwnd = HWND::default();
+        let dm_size = DocumentPropertiesW(
+            null_hwnd,
+            hprinter,
+            PCWSTR(printer_name_w.as_ptr()),
+            None,
+            None,
+            0,
+        );
+        if dm_size < 0 {
+            let _ = ClosePrinter(hprinter);
+            return Err(format!("DocumentPropertiesW 查询大小失败: {}", dm_size));
+        }
+
+        let dm_size = dm_size as usize;
+        if dm_size < std::mem::size_of::<DEVMODEW>() {
+            let _ = ClosePrinter(hprinter);
+            return Err(format!("DEVMODE 大小异常: {} bytes", dm_size));
+        }
+
+        let mut dm_buf: Vec<u8> = vec![0u8; dm_size];
+        let dm_ptr = dm_buf.as_mut_ptr() as *mut DEVMODEW;
+
+        let result = DocumentPropertiesW(
+            null_hwnd,
+            hprinter,
+            PCWSTR(printer_name_w.as_ptr()),
+            Some(dm_ptr),
+            None,
+            DM_OUT_BUFFER.0 as u32,
+        );
+        let _ = ClosePrinter(hprinter);
+
+        if result != 1 {
+            return Err(format!("DocumentPropertiesW 获取默认设置失败: {}", result));
+        }
+
+        let dev_mode = dm_buf.as_ptr() as *const DEVMODEW;
+        let dm_copy = std::ptr::read(dev_mode);
+        log::info!("Got default DEVMODE for printer: {} (size={})", printer_name, dm_size);
+
+        Ok(dm_copy)
+    }
+}
+
 fn build_dev_mode(
+    base: Option<DEVMODEW>,
     copies: u32,
     duplex: bool,
     color_mode: &str,
     paper_w_mm: f32,
     paper_h_mm: f32,
 ) -> Result<DEVMODEW, String> {
-    let mut dm = DEVMODEW::default();
-    dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    let mut dm = match base {
+        Some(b) => b,
+        None => {
+            let mut dm = DEVMODEW::default();
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            dm
+        }
+    };
 
     if paper_w_mm > paper_h_mm {
         dm.Anonymous1.Anonymous1.dmOrientation = DMORIENT_LANDSCAPE as i16;

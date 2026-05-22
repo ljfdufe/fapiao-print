@@ -347,6 +347,8 @@ async fn generate_pdf_from_layout(
     let is_direct = direct_print.unwrap_or(false);
 
     #[cfg(target_os = "windows")]
+    let mut shell_fallback_open = false;
+    #[cfg(target_os = "windows")]
     if should_print {
         if is_direct {
             let resolved_printer = match &printer_name {
@@ -367,7 +369,10 @@ async fn generate_pdf_from_layout(
                     &sumatra.path, &output_for_print, &resolved_printer, &settings_str,
                 )?;
             } else {
-                shell_execute_print(&output_for_print, printer_name.as_deref())?;
+                let printed = shell_execute_print(&output_for_print, printer_name.as_deref())?;
+                if !printed {
+                    shell_fallback_open = true;
+                }
             }
         } else {
             shell_execute("open", &output_for_print.to_string_lossy())?;
@@ -376,6 +381,8 @@ async fn generate_pdf_from_layout(
 
     let msg = if !should_print {
         "PDF已生成".to_string()
+    } else if shell_fallback_open {
+        "PDF阅读器不支持静默打印，已打开PDF，请手动打印".to_string()
     } else if is_direct {
         if let Some(name) = printer_name {
             format!("已发送到打印机「{}」", name)
@@ -410,18 +417,22 @@ fn print_pdf_file(
     let is_direct = direct_print.unwrap_or(false);
 
     #[cfg(target_os = "windows")]
+    let mut shell_fallback_open = false;
+    #[cfg(target_os = "windows")]
     {
         if is_direct {
-            // Direct print: use "printto" verb + SW_HIDE to print silently
-            shell_execute_print(output, printer_name.as_deref())?;
+            let printed = shell_execute_print(output, printer_name.as_deref())?;
+            if !printed {
+                shell_fallback_open = true;
+            }
         } else {
-            // Dialog mode: open the PDF file first, let user decide what to do
-            // This avoids the "flash and print immediately" issue with some PDF readers
             shell_execute("open", &output.to_string_lossy())?;
         }
     }
 
-    let msg = if is_direct {
+    let msg = if shell_fallback_open {
+        "PDF阅读器不支持静默打印，已打开PDF，请手动打印".to_string()
+    } else if is_direct {
         if let Some(name) = printer_name {
             format!("已直接打印 → {}", name)
         } else {
@@ -927,11 +938,13 @@ fn shell_execute(verb: &str, file: &str) -> Result<(), String> {
 /// Print a PDF file silently. Uses ShellExecute to delegate to PDF reader.
 /// Strategy 1: ShellExecuteW "printto" — specify printer, silent print
 /// Strategy 2: ShellExecuteW "print" — use default printer, may show dialog
+/// Strategy 3: ShellExecuteW "open" — fallback: open PDF for manual printing
+/// Returns Ok(true) if printed, Ok(false) if opened as fallback.
 #[cfg(target_os = "windows")]
-fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -> Result<(), String> {
+fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -> Result<bool, String> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL, SW_SHOW};
 
     let resolved_printer: Option<String> = match printer_name {
         Some(name) => Some(name.to_string()),
@@ -942,9 +955,10 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
 
     let _com = ComGuard::init();
     unsafe {
+        let file: HSTRING = pdf_path.to_string_lossy().to_string().into();
+
         // Strategy 1: ShellExecuteW "printto" — specify printer, silent
         let verb: HSTRING = "printto".into();
-        let file: HSTRING = pdf_path.to_string_lossy().to_string().into();
         let printer_hstring: HSTRING = printer_str.into();
         let params = PCWSTR::from_raw(printer_hstring.as_ptr());
 
@@ -957,7 +971,7 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
             SW_HIDE,
         );
         if ret.0 as isize > 32 {
-            return Ok(());
+            return Ok(true);
         }
         log::warn!("ShellExecute printto failed (code: {}), trying simple print", ret.0 as isize);
 
@@ -972,7 +986,22 @@ fn shell_execute_print(pdf_path: &std::path::Path, printer_name: Option<&str>) -
             SW_SHOW,
         );
         if ret.0 as isize > 32 {
-            return Ok(());
+            return Ok(true);
+        }
+        log::warn!("ShellExecute print failed (code: {}), falling back to open", ret.0 as isize);
+
+        // Strategy 3: Fallback — open the PDF so user can print manually
+        let verb: HSTRING = "open".into();
+        let ret = ShellExecuteW(
+            None,
+            &verb,
+            &file,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        if ret.0 as isize > 32 {
+            return Ok(false);
         }
 
         return Err(format!(
