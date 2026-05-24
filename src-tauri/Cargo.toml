@@ -1,6 +1,6 @@
 [package]
 name = "fapiao-print"
-version = "1.10.2"
+version = "1.10.3"
 description = "电子发票批量打印工具"
 authors = ["fapiao-print"]
 license = "MIT"
@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }

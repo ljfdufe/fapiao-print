@@ -348,6 +348,8 @@ async fn generate_pdf_from_layout(
 
     #[cfg(target_os = "windows")]
     let mut shell_fallback_open = false;
+    #[cfg(not(target_os = "windows"))]
+    let shell_fallback_open = false;
     #[cfg(target_os = "windows")]
     if should_print {
         if is_direct {
@@ -418,6 +420,8 @@ fn print_pdf_file(
 
     #[cfg(target_os = "windows")]
     let mut shell_fallback_open = false;
+    #[cfg(not(target_os = "windows"))]
+    let shell_fallback_open = false;
     #[cfg(target_os = "windows")]
     {
         if is_direct {

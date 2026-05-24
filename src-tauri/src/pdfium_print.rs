@@ -13,6 +13,22 @@ type FPDF_DOCUMENT = *mut c_void;
 type FPDF_PAGE = *mut c_void;
 type FPDF_BITMAP = *mut c_void;
 
+type FnRenderPage = unsafe extern "C" fn(*mut c_void, FPDF_PAGE, i32, i32, i32, i32, i32, i32);
+
+extern "C" {
+    fn SafeCallRenderPage(
+        func: FnRenderPage,
+        dc: *mut c_void,
+        page: FPDF_PAGE,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        rotate: i32,
+        flags: i32,
+    ) -> u32;
+}
+
 type FnInitLibrary = unsafe fn();
 type FnDestroyLibrary = unsafe fn();
 type FnLoadMemDocument = unsafe fn(*const c_void, i32, *const u8) -> FPDF_DOCUMENT;
@@ -20,7 +36,6 @@ type FnGetPageCount = unsafe fn(FPDF_DOCUMENT) -> i32;
 type FnGetPageWidthF = unsafe fn(FPDF_PAGE) -> f32;
 type FnGetPageHeightF = unsafe fn(FPDF_PAGE) -> f32;
 type FnLoadPage = unsafe fn(FPDF_DOCUMENT, i32) -> FPDF_PAGE;
-type FnRenderPage = unsafe fn(*mut c_void, FPDF_PAGE, i32, i32, i32, i32, i32, i32);
 type FnClosePage = unsafe fn(FPDF_PAGE);
 type FnCloseDocument = unsafe fn(FPDF_DOCUMENT);
 type FnGetLastError = unsafe fn() -> i32;
@@ -361,7 +376,7 @@ pub fn pdfium_vector_print(
 
     let printer_name_w: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let base_devmode = match get_printer_default_devmode(printer_name) {
+    let mut base_devmode = match get_printer_default_devmode(printer_name) {
         Ok(dm) => {
             log::info!("Using printer default DEVMODE as base");
             Some(dm)
@@ -372,14 +387,15 @@ pub fn pdfium_vector_print(
         }
     };
 
-    let dev_mode = build_dev_mode(base_devmode, copies, duplex, color_mode, paper_w_mm, paper_h_mm)?;
+    let dev_mode_buf = build_dev_mode(base_devmode.as_deref_mut(), copies, duplex, color_mode, paper_w_mm, paper_h_mm)?;
+    let dev_mode_ptr = dev_mode_buf.as_ptr() as *const DEVMODEW;
 
     let hdc = unsafe {
         CreateDCW(
             None,
             PCWSTR(printer_name_w.as_ptr()),
             None,
-            Some(&dev_mode as *const DEVMODEW),
+            Some(dev_mode_ptr),
         )
     };
 
@@ -450,22 +466,108 @@ pub fn pdfium_vector_print(
                 return Err(format!("无法加载第 {} 页 (错误: {})", page_idx + 1, pdfium_err_desc(err)));
             }
 
-            unsafe {
-                (funcs.render_page)(
+            let render_flags = FPDF_ANNOT | FPDF_PRINTING;
+
+            let seh_result = unsafe {
+                SafeCallRenderPage(
+                    funcs.render_page,
                     print_dc.0 as *mut c_void,
                     page,
                     0, 0, printer_w, printer_h,
                     0,
-                    FPDF_ANNOT | FPDF_PRINTING,
+                    render_flags,
+                )
+            };
+
+            if seh_result == 0 {
+                unsafe { (funcs.close_page)(page); }
+                return Ok(true);
+            }
+
+            log::warn!(
+                "FPDF_RenderPage crashed (SEH code: {}), falling back to bitmap for page {}",
+                seh_result, page_idx + 1
+            );
+
+            let page_w = unsafe { (funcs.get_page_width_f)(page) };
+            let page_h = unsafe { (funcs.get_page_height_f)(page) };
+            if page_w <= 0.0 || page_h <= 0.0 {
+                unsafe { (funcs.close_page)(page); };
+                return Err(format!("第 {} 页尺寸无效", page_idx + 1));
+            }
+
+            let scale = printer_dpi as f32 / 72.0;
+            let bmp_w = (page_w * scale).round() as i32;
+            let bmp_h = (page_h * scale).round() as i32;
+            if bmp_w <= 0 || bmp_h <= 0 {
+                unsafe { (funcs.close_page)(page); };
+                return Err(format!("第 {} 页渲染尺寸无效", page_idx + 1));
+            }
+
+            let bitmap = unsafe { (funcs.bitmap_create)(bmp_w, bmp_h, 0) };
+            if bitmap.is_null() {
+                unsafe { (funcs.close_page)(page); };
+                return Err(format!("创建位图失败 (第 {} 页)", page_idx + 1));
+            }
+
+            unsafe { (funcs.bitmap_fill_rect)(bitmap, 0, 0, bmp_w, bmp_h, 0xFFFFFFFF) };
+
+            unsafe {
+                (funcs.render_page_bitmap)(
+                    bitmap, page,
+                    0, 0, bmp_w, bmp_h,
+                    0,
+                    render_flags,
                 );
             }
 
+            let stride = unsafe { (funcs.bitmap_get_stride)(bitmap) };
+            let buffer = unsafe { (funcs.bitmap_get_buffer)(bitmap) };
+
+            if !buffer.is_null() && stride > 0 {
+                let bmi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: bmp_w,
+                        biHeight: -bmp_h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        biSizeImage: 0,
+                        biXPelsPerMeter: 0,
+                        biYPelsPerMeter: 0,
+                        biClrUsed: 0,
+                        biClrImportant: 0,
+                    },
+                    bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
+                };
+
+                unsafe {
+                    StretchDIBits(
+                        print_dc,
+                        0, 0, printer_w, printer_h,
+                        0, 0, bmp_w, bmp_h,
+                        Some(buffer as *const c_void),
+                        &bmi,
+                        DIB_RGB_COLORS,
+                        SRCCOPY,
+                    );
+                }
+            }
+
+            unsafe { (funcs.bitmap_destroy)(bitmap); }
             unsafe { (funcs.close_page)(page); }
-            Ok(())
+            Ok(false)
         });
 
         match render_result {
-            Ok(()) => pages_printed += 1,
+            Ok(true) => pages_printed += 1,
+            Ok(false) => {
+                pages_printed += 1;
+                if last_error.is_empty() {
+                    last_error = "矢量渲染异常，已自动回退位图渲染".to_string();
+                }
+            }
             Err(e) => last_error = e,
         }
 
@@ -505,7 +607,7 @@ pub fn pdfium_vector_print(
     })
 }
 
-fn get_printer_default_devmode(printer_name: &str) -> Result<DEVMODEW, String> {
+fn get_printer_default_devmode(printer_name: &str) -> Result<Vec<u8>, String> {
     use windows::Win32::Graphics::Printing::{OpenPrinterW, ClosePrinter, DocumentPropertiesW, PRINTER_DEFAULTSW};
     use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::core::PWSTR;
@@ -564,70 +666,80 @@ fn get_printer_default_devmode(printer_name: &str) -> Result<DEVMODEW, String> {
             return Err(format!("DocumentPropertiesW 获取默认设置失败: {}", result));
         }
 
-        let dev_mode = dm_buf.as_ptr() as *const DEVMODEW;
-        let dm_copy = std::ptr::read(dev_mode);
-        log::info!("Got default DEVMODE for printer: {} (size={})", printer_name, dm_size);
+        let dm_header = dm_buf.as_ptr() as *const DEVMODEW;
+        let driver_extra = (*dm_header).dmDriverExtra as usize;
+        log::info!(
+            "Got default DEVMODE for printer: {} (total={} bytes, sizeof(DEVMODEW)={}, driverExtra={})",
+            printer_name, dm_size, std::mem::size_of::<DEVMODEW>(), driver_extra
+        );
 
-        Ok(dm_copy)
+        Ok(dm_buf)
     }
 }
 
 fn build_dev_mode(
-    base: Option<DEVMODEW>,
+    base: Option<&mut [u8]>,
     copies: u32,
     duplex: bool,
     color_mode: &str,
     paper_w_mm: f32,
     paper_h_mm: f32,
-) -> Result<DEVMODEW, String> {
-    let mut dm = match base {
-        Some(b) => b,
+) -> Result<Vec<u8>, String> {
+    let mut buf = match base {
+        Some(b) => b.to_vec(),
         None => {
-            let mut dm = DEVMODEW::default();
-            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-            dm
+            let mut buf = vec![0u8; std::mem::size_of::<DEVMODEW>()];
+            let dm = buf.as_mut_ptr() as *mut DEVMODEW;
+            unsafe {
+                (*dm).dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+                (*dm).dmDriverExtra = 0;
+            }
+            buf
         }
     };
 
-    if paper_w_mm > paper_h_mm {
-        dm.Anonymous1.Anonymous1.dmOrientation = DMORIENT_LANDSCAPE as i16;
-    } else {
-        dm.Anonymous1.Anonymous1.dmOrientation = DMORIENT_PORTRAIT as i16;
-    }
-    dm.dmFields |= DM_ORIENTATION;
-
-    if copies > 1 {
-        dm.Anonymous1.Anonymous1.dmCopies = copies as i16;
-        dm.dmFields |= DM_COPIES;
-    }
-
-    if duplex {
-        dm.dmDuplex = DEVMODE_DUPLEX(DMDUP_VERTICAL.0);
-        dm.dmFields |= DM_DUPLEX;
-    }
-
-    match color_mode {
-        "grayscale" | "monochrome" | "bw" => {
-            dm.dmColor = DEVMODE_COLOR(DMCOLOR_MONOCHROME.0);
-            dm.dmFields |= DM_COLOR;
+    let dm = buf.as_mut_ptr() as *mut DEVMODEW;
+    unsafe {
+        if paper_w_mm > paper_h_mm {
+            (*dm).Anonymous1.Anonymous1.dmOrientation = DMORIENT_LANDSCAPE as i16;
+        } else {
+            (*dm).Anonymous1.Anonymous1.dmOrientation = DMORIENT_PORTRAIT as i16;
         }
-        _ => {
-            dm.dmColor = DEVMODE_COLOR(DMCOLOR_COLOR.0);
-            dm.dmFields |= DM_COLOR;
+        (*dm).dmFields |= DM_ORIENTATION;
+
+        if copies > 1 {
+            (*dm).Anonymous1.Anonymous1.dmCopies = copies as i16;
+            (*dm).dmFields |= DM_COPIES;
+        }
+
+        if duplex {
+            (*dm).dmDuplex = DEVMODE_DUPLEX(DMDUP_VERTICAL.0);
+            (*dm).dmFields |= DM_DUPLEX;
+        }
+
+        match color_mode {
+            "grayscale" | "monochrome" | "bw" => {
+                (*dm).dmColor = DEVMODE_COLOR(DMCOLOR_MONOCHROME.0);
+                (*dm).dmFields |= DM_COLOR;
+            }
+            _ => {
+                (*dm).dmColor = DEVMODE_COLOR(DMCOLOR_COLOR.0);
+                (*dm).dmFields |= DM_COLOR;
+            }
+        }
+
+        if let Some(paper) = infer_paper_size(paper_w_mm, paper_h_mm) {
+            (*dm).Anonymous1.Anonymous1.dmPaperSize = paper as i16;
+            (*dm).dmFields |= DM_PAPERSIZE;
+        } else {
+            (*dm).Anonymous1.Anonymous1.dmPaperSize = DMPAPER_USER as i16;
+            (*dm).Anonymous1.Anonymous1.dmPaperWidth = (paper_w_mm * 10.0) as i16;
+            (*dm).Anonymous1.Anonymous1.dmPaperLength = (paper_h_mm * 10.0) as i16;
+            (*dm).dmFields |= DM_PAPERSIZE | DM_PAPERWIDTH | DM_PAPERLENGTH;
         }
     }
 
-    if let Some(paper) = infer_paper_size(paper_w_mm, paper_h_mm) {
-        dm.Anonymous1.Anonymous1.dmPaperSize = paper as i16;
-        dm.dmFields |= DM_PAPERSIZE;
-    } else {
-        dm.Anonymous1.Anonymous1.dmPaperSize = DMPAPER_USER as i16;
-        dm.Anonymous1.Anonymous1.dmPaperWidth = (paper_w_mm * 10.0) as i16;
-        dm.Anonymous1.Anonymous1.dmPaperLength = (paper_h_mm * 10.0) as i16;
-        dm.dmFields |= DM_PAPERSIZE | DM_PAPERWIDTH | DM_PAPERLENGTH;
-    }
-
-    Ok(dm)
+    Ok(buf)
 }
 
 fn infer_paper_size(w: f32, h: f32) -> Option<u32> {

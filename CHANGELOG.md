@@ -1,5 +1,24 @@
 # 📋 更新日志
 
+## v1.10.3 — PDFium 打印闪退修复 + DEVMODE 完整缓冲区
+
+### 🐛 修复
+
+- **PDFium 打印闪退（部分电脑）**：`FPDF_RenderPage` 直打某些打印机 DC 时，驱动 GDI 实现有 bug 导致原生访问违例（ACCESS_VIOLATION），Rust 无法捕获直接闪退。现新增 SEH（结构化异常处理）包装器 `seh_wrapper.c`，用 C 的 `__try/__except` 捕获原生崩溃，自动 fallback 到位图渲染（`FPDF_RenderPageBitmap` + `StretchDIBits`），不再闪退
+- **DEVMODE 驱动私有数据截断**：`get_printer_default_devmode()` 原先用 `std::ptr::read` 只复制 `sizeof(DEVMODEW)` 字节，丢弃了 `dmDriverExtra` 字节的驱动私有数据，导致 `CreateDCW` 访问违例。现改为返回完整 `Vec<u8>` 缓冲区，保留全部驱动配置
+- **`shell_fallback_open` 非 Windows 编译失败**：变量在 `#[cfg(target_os = "windows")]` 块内声明但在块外使用，非 Windows 平台编译报错。已添加 `#[cfg(not(target_os = "windows"))]` 分支修复
+
+### 🔧 优化
+
+- **矢量优先 + 位图 fallback**：PDFium 打印始终先尝试矢量直打 DC（零质量损失），仅在 SEH 捕获异常时自动 fallback 到位图渲染，兼顾打印质量和稳定性
+- **PDF阅读器模式 Strategy 3 fallback**：`shell_execute_print()` 新增 `ShellExecuteW("open")` fallback，当 `printto`/`print` 均失败时自动打开 PDF 供用户手动打印
+
+### 📦 新增依赖
+
+- `cc = "1"`（build-dependencies）— 编译 `seh_wrapper.c` 为静态库
+
+---
+
 ## v1.10.2 — 打印兼容性修复
 
 ### 🐛 修复
