@@ -133,10 +133,11 @@ async function listenPdfProgress() {
 }
 
 /**
- * Print invoices — three independent paths:
- * - Confirm mode: custom dialog → SumatraPDF silent print
- * - Direct/silent mode: SumatraPDF silent print directly
- * - PDF reader mode: generate PDF → auto-print via default reader (uses PDF cache)
+ * Print invoices — four independent paths:
+ * - Confirm mode: custom dialog → PDFium/SumatraPDF silent print
+ * - PDFium mode: vector print via PDFium engine (recommended)
+ * - PDF reader mode: generate PDF → ShellExecute print via default reader
+ * - Direct/SumatraPDF mode: SumatraPDF silent print
  */
 async function doPrint() {
   var files = getActiveFiles();
@@ -258,18 +259,43 @@ async function doSumatraPrint(files, s) {
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
         outputPath: outputPath,
-        directPrint: true,
-        printerName: s.printerName || null,
-        printAfter: true
+        directPrint: false,
+        printerName: null,
+        printAfter: false
       });
       if (unlisten) unlisten();
-      hideLoading();
       if (result.success) {
         _lastPdfPath = result.pdfPath;
         _pdfDirty = false;
-        toast('\uD83D\uDCA8 ' + result.message);
+        showLoading('正在通过SumatraPDF打印...');
+        try {
+          var printResult = await invoke('sumatrapdf_print', {
+            pdfPath: result.pdfPath,
+            printerName: s.printerName || null,
+            copies: s.copies || 1,
+            duplex: s.duplex || false,
+            colorMode: s.colorMode || 'color',
+            fitMode: s.fitMode,
+            paperW: s.paperW || 210,
+            paperH: s.paperH || 297
+          });
+          hideLoading();
+          if (printResult.success) {
+            toast('\uD83D\uDCA8 ' + printResult.message);
+          } else {
+            toast('打印失败：' + printResult.message);
+          }
+        } catch(e2) {
+          hideLoading();
+          if (String(e2).indexOf('SumatraPDF') >= 0) {
+            showSumatraPdfMissing();
+          } else {
+            toast('打印出错：' + String(e2));
+          }
+        }
       } else {
-        toast('打印失败：' + result.message);
+        hideLoading();
+        toast('PDF生成失败：' + result.message);
       }
     } else {
       if (unlisten) unlisten();
@@ -388,17 +414,34 @@ async function doPdfReaderPrint(files, s) {
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
         outputPath: outputPath,
-        directPrint: true,
-        printerName: s.printerName || null
+        directPrint: false,
+        printerName: null,
+        printAfter: false
       });
       if (unlisten) unlisten();
-      hideLoading();
       if (result.success) {
         _lastPdfPath = result.pdfPath;
         _pdfDirty = false;
-        toast('\uD83D\uDCC4 ' + result.message);
+        showLoading('正在通过PDF阅读器打印...');
+        try {
+          var printResult = await invoke('print_pdf_file', {
+            pdfPath: result.pdfPath,
+            directPrint: true,
+            printerName: s.printerName || null
+          });
+          hideLoading();
+          if (printResult.success) {
+            toast('\uD83D\uDCC4 ' + printResult.message);
+          } else {
+            toast('打印失败：' + printResult.message);
+          }
+        } catch(e2) {
+          hideLoading();
+          toast('打印出错：' + String(e2));
+        }
       } else {
-        toast('打印失败：' + result.message);
+        hideLoading();
+        toast('PDF生成失败：' + result.message);
       }
     } else {
       if (unlisten) unlisten();

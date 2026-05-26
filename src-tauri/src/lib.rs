@@ -392,7 +392,7 @@ async fn generate_pdf_from_layout(
             "已发送到默认打印机".to_string()
         }
     } else {
-        "已弹出打印对话框".to_string()
+        "已打开PDF，请在阅读器中打印".to_string()
     };
 
     Ok(pdf_engine::PdfResult {
