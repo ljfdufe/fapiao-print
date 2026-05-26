@@ -10,6 +10,8 @@
 
 ### 🔧 优化
 
+- **PDF阅读器模式提示完善**：UI 提示补充「不支持选择打印机」说明，避免用户误以为该模式可控制打印机；AGENTS.md 同步补充该已知限制的技术原因（`ShellExecuteW printto` 动词依赖阅读器实现，多数阅读器不支持指定打印机，fallback 到默认打印机）
+
 - **矢量优先 + 位图 fallback**：PDFium 打印始终先尝试矢量直打 DC（零质量损失），仅在 SEH 捕获异常时自动 fallback 到位图渲染，兼顾打印质量和稳定性
 - **PDF阅读器模式 Strategy 3 fallback**：`shell_execute_print()` 新增 `ShellExecuteW("open")` fallback，当 `printto`/`print` 均失败时自动打开 PDF 供用户手动打印
 

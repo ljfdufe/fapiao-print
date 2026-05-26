@@ -35,6 +35,7 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - `generate_pdf_from_layout()` 入口
 - lopdf 直通: `can_passthrough_pdf()` 判断 → `extract_page_as_form_xobject()` → JPEG DCTDecode 嵌入
 - 打印四模式: PDF阅读器模式(默认) / 弹窗确认 / 静默打印PDFium(推荐) / 静默打印SumatraPDF
+- **PDF阅读器模式已知限制**: 通过 `ShellExecuteW` 委托系统默认 PDF 阅读器打印，`printto` 动词能否指定打印机取决于阅读器实现（Edge/Chrome 内置查看器不支持），多数情况下 fallback 到 `print` 动词使用默认打印机，**无法可靠控制打印机选择**
 
 ### PDF 渲染双引擎 (v1.9.10+)
 
