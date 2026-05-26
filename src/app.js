@@ -1377,6 +1377,19 @@ function renderFileList() {
   list.scrollTop = scrollTop;
   updateAmountSummary();
 }
+function toggleCopyMenu() {
+  var menu = document.getElementById('copyMenu');
+  menu.classList.toggle('hidden');
+}
+function setAllCopies(e, n) {
+  e.stopPropagation();
+  var sel = S.files.filter(function(f) { return f.checked; });
+  if (!sel.length) { toast('请先选择发票'); document.getElementById('copyMenu').classList.add('hidden'); return; }
+  sel.forEach(function(f) { f.copies = n; });
+  document.getElementById('copyMenu').classList.add('hidden');
+  renderFileList();
+  updatePreview();
+}
 function togCheck(i) { S.files[i].checked = !S.files[i].checked; renderFileList(); updatePreview(); }
 function selectAll() { S.files.forEach(function(f) { f.checked = true; }); renderFileList(); updatePreview(); }
 function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); renderFileList(); updatePreview(); }
@@ -1541,7 +1554,8 @@ function openInvModal(i) {
   var mRA = function(label, html) { return '<div class="modal-row"><label class="modal-lbl">' + label + '</label><div class="modal-ctrl">' + html + '</div></div>'; };
   document.getElementById('invModalBody').innerHTML =
     '<div style="font-size:13px;padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px">\uD83D\uDCC4 ' + escHtml(f.name) + '</div>' +
-    mRF('份数', '<button class="btn btn-sm btn-icon" onclick="changeModalCopies(-1)">\u2212</button><input type="number" id="mCopies" value="' + f.copies + '" min="1" max="99" style="width:52px;text-align:center;flex:none"><button class="btn btn-sm btn-icon" onclick="changeModalCopies(1)">+</button>') +
+    mRF('排版份数', '<button class="btn btn-sm btn-icon" onclick="changeModalCopies(-1)">\u2212</button><input type="number" id="mCopies" value="' + f.copies + '" min="1" max="99" style="width:52px;text-align:center;flex:none"><button class="btn btn-sm btn-icon" onclick="changeModalCopies(1)">+</button>') +
+    '<div style="font-size:10px;color:var(--text-muted);margin:-6px 0 8px 76px">同一发票在布局中占几个位置</div>' +
     mRF('含税价', '<span style="font-size:14px;font-weight:600;color:var(--success);flex-shrink:0">\u00A5</span><input type="number" id="mAmountTax" value="' + (f.amountTax || '') + '" min="0" step="0.01" placeholder="0.00" style="' + _fw + '">') +
     mRF('不含税', '<span style="font-size:14px;font-weight:600;color:var(--text-muted);flex-shrink:0">\u00A5</span><input type="number" id="mAmountNoTax" value="' + (f.amountNoTax || '') + '" min="0" step="0.01" placeholder="0.00" style="' + _fw + '">') +
     mRF('税额', '<span style="font-size:14px;font-weight:600;color:var(--warning,orange);flex-shrink:0">\u00A5</span><input type="number" id="mTaxAmount" value="' + (f.taxAmount || '') + '" min="0" step="0.01" placeholder="0.00" style="' + _fw + '">') +
@@ -2023,9 +2037,13 @@ function toggleZoomMenu() {
   document.getElementById('zoomMenu').classList.toggle('hidden');
 }
 document.addEventListener('click', function(e) {
+  if (!e.target.closest('.copy-ctrl')) {
+    var cm = document.getElementById('copyMenu');
+    if (cm) cm.classList.add('hidden');
+  }
   if (!e.target.closest('.zoom-ctrl')) {
-    var m = document.getElementById('zoomMenu');
-    if (m) m.classList.add('hidden');
+    var zm = document.getElementById('zoomMenu');
+    if (zm) zm.classList.add('hidden');
   }
 });
 function updatePrintBtn() { document.getElementById('printBtn').disabled = !S.files.some(function(f) { return f.checked; }); }

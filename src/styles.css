@@ -173,7 +173,7 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 .file-meta-left { display: flex; gap: 4px; align-items: center; min-width: 0; overflow: hidden; flex-shrink: 1; white-space: nowrap; }
 .file-meta-sep { flex: 1; }
 .file-meta-right { display: flex; gap: 2px; align-items: center; flex-shrink: 0; }
-.copy-badge { background: var(--warning-light); color: var(--warning); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; }
+.copy-badge { background: var(--warning-light); color: var(--warning); padding: 2px 7px; border-radius: 3px; font-size: 11px; font-weight: 700; }
 .amt-badge { background: var(--success-light); color: var(--success); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .amt-warn-badge { background: var(--danger-light); color: var(--danger); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; white-space: nowrap; cursor: help; }
 .rot-badge { font-size: 10px; color: var(--accent); font-weight: 700; }
@@ -203,6 +203,21 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 }
 #ocrAllBtn { min-width: 32px; font-size: 12px; transition: min-width 0.2s; }
 #ocrAllBtn:disabled { background: var(--accent-light); color: var(--accent); }
+.copy-menu {
+  position: absolute; top: 100%; left: 0; z-index: 100;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); min-width: 120px; padding: 4px 0;
+}
+.copy-menu-item {
+  padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  color: var(--text-primary); transition: background 0.1s;
+}
+.copy-menu-item:hover { background: var(--accent-light); }
+.copy-menu-sep { height: 1px; background: var(--border); margin: 4px 8px; }
+.copy-menu-hint {
+  padding: 6px 12px; font-size: 10px; color: var(--text-muted); line-height: 1.4; white-space: normal;
+}
+.copy-ctrl { position: relative; }
 
 /* ===== Settings ===== */
 .sec { padding: 12px; border-bottom: 1px solid var(--border); }

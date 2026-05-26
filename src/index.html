@@ -35,6 +35,16 @@
         <div class="file-header">
           <div class="file-count" id="fileCount">0 张，已选 0</div>
           <div class="file-actions">
+            <div class="copy-ctrl">
+              <button class="ib" onclick="toggleCopyMenu()" title="设置选中发票排版份数">②</button>
+              <div class="copy-menu hidden" id="copyMenu">
+                <div class="copy-menu-item" onclick="setAllCopies(event,1)">选中项 ×1</div>
+                <div class="copy-menu-item" onclick="setAllCopies(event,2)">选中项 ×2 ⭐</div>
+                <div class="copy-menu-item" onclick="setAllCopies(event,3)">选中项 ×3</div>
+                <div class="copy-menu-sep"></div>
+                <div class="copy-menu-hint">💡 双击单张发票可单独设置份数</div>
+              </div>
+            </div>
             <button class="ib" id="ocrAllBtn" onclick="ocrAll()" title="一键识别">🔍</button>
             <button class="ib" onclick="selectAll()" title="全选">☑</button>
             <button class="ib" onclick="deselectAll()" title="取消全选">◻</button>
@@ -154,7 +164,7 @@
           <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">弹窗确认：确认后打印；PDFium：推荐，打印清晰（需下载）；SumatraPDF：备用（需下载）；PDF阅读器：通过默认阅读器打印。</div>
         </div>
         <div class="sec">
-          <div class="sec-title">🔢 份数设置</div>
+          <div class="sec-title">🔢 打印份数</div>
           <div class="row"><label class="lbl">份数</label><div style="display:flex;align-items:center;gap:4px"><button class="btn btn-sm btn-icon" onclick="changeCopies(-1)">−</button><input type="number" id="copies" value="1" min="1" max="99" style="width:52px;text-align:center" onchange="updatePreview()"><button class="btn btn-sm btn-icon" onclick="changeCopies(1)">+</button></div></div>
           <div class="trow"><label class="tlbl">逐份打印</label><button class="tgl on" id="toggleCollate" onclick="toggleFeature('collate',this)"></button></div>
           <div class="trow"><label class="tlbl">双面打印</label><button class="tgl" id="toggleDuplex" onclick="toggleFeature('duplex',this)"></button></div>
