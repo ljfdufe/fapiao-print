@@ -66,6 +66,7 @@ html.dark input[type="range"] { accent-color: #5b8def; }
 html.dark .file-thumb { background: #1a1a2e; border-color: #2a2a4a; }
 html.dark .copy-badge { background: #3a3520; color: #d69e2e; }
 html.dark .amt-badge { background: #1a3a36; color: #38b2ac; }
+html.dark .amt-warn-badge { background: #3a2020; color: #fc8181; }
 html.dark .seller-badge { background: #1e2a4a; color: #a0aec0; }
 html.dark .ticket-badge { background: #1a2a4a; color: #64b5f6; }
 html.dark .nontax-badge { background: #2a1e1a; color: #ed8936; }
@@ -174,6 +175,7 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 .file-meta-right { display: flex; gap: 2px; align-items: center; flex-shrink: 0; }
 .copy-badge { background: var(--warning-light); color: var(--warning); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; }
 .amt-badge { background: var(--success-light); color: var(--success); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.amt-warn-badge { background: var(--danger-light); color: var(--danger); padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; white-space: nowrap; cursor: help; }
 .rot-badge { font-size: 10px; color: var(--accent); font-weight: 700; }
 .seller-badge { font-size: 10px; color: var(--text-muted); padding: 1px 4px; border-radius: 3px; background: var(--surface2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
 .ticket-badge { font-size: 10px; color: #1976d2; padding: 1px 4px; border-radius: 3px; background: #e3f2fd; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
@@ -187,6 +189,7 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 #fileList { flex: 1; overflow-y: auto; }
 .file-summary .amt-total { color: var(--success); font-weight: 700; font-size: 14px; }
 .file-summary .amt-count { color: var(--text-muted); }
+.file-summary .amt-warn-count { color: var(--danger); font-size: 11px; margin-left: 6px; cursor: help; }
 .ib {
   width: 28px; height: 28px; border: none; background: transparent; cursor: pointer;
   border-radius: 5px; display: flex; align-items: center; justify-content: center;

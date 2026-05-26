@@ -939,6 +939,24 @@ function applyOcrAsync(fileObj, dataUrl) {
   _drainOcrQueue();
 }
 
+function buildAmtBadge(f) {
+  if (f.amountTax > 0 || f.amountNoTax > 0) {
+    return '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>';
+  }
+  if (f._amtValidationFail) {
+    var v = f._amtValidationFail;
+    var tip = '\u26A0 金额校验失败\n含税: \u00A5' + v.amountTax.toFixed(2) +
+      '\n不含税: \u00A5' + v.amountNoTax.toFixed(2) +
+      '\n税额: \u00A5' + v.taxAmount.toFixed(2) +
+      '\n验证: \u00A5' + v.amountNoTax.toFixed(2) + ' + \u00A5' + v.taxAmount.toFixed(2) + ' = \u00A5' + (Math.round((v.amountNoTax + v.taxAmount) * 100) / 100).toFixed(2) + ' \u2260 \u00A5' + v.amountTax.toFixed(2);
+    return '<span class="amt-warn-badge" title="' + escHtml(tip) + '">\u26A0\u00A5' + v.amountTax.toFixed(2) + '</span>';
+  }
+  if (f._ocrPending) {
+    return '<span class="ocr-spinner" title="识别中"></span>';
+  }
+  return '';
+}
+
 /**
  * Incrementally update a single file item's badges in the sidebar
  */
@@ -951,7 +969,7 @@ function updateFileItem(fileObj) {
   var f = fileObj;
   var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
   var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
-  var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
+  var ab = buildAmtBadge(f);
   var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
   var metaEl = items[idx].querySelector('.file-meta');
   var sellerEl = items[idx].querySelector('.file-seller');
@@ -1323,7 +1341,7 @@ function renderFileList() {
     if (i === _activeFileIdx) cls += ' active-item';
     var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
     var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
-    var ab = (f.amountTax > 0 || f.amountNoTax > 0) ? '<span class="amt-badge">\u00A5' + (f.amountTax || f.amountNoTax).toFixed(2) + '</span>' : (f._ocrPending ? '<span class="ocr-spinner" title="识别中"></span>' : '');
+    var ab = buildAmtBadge(f);
     var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
     // XSS FIX: escHtml(f.name) in both title and display text
     // XSS FIX: escHtml(f.previewUrl) in img src, escHtml(f.type) in type-badge
@@ -1475,11 +1493,15 @@ function updateAmountSummary() {
   var noTaxTotal = checked.reduce(function(s, f) { return s + (f.amountNoTax || 0); }, 0);
   var taxAmtTotal = checked.reduce(function(s, f) { return s + (f.taxAmount || 0); }, 0);
   var withAmt = checked.filter(function(f) { return (f.amountTax || f.amountNoTax) > 0; }).length;
+  var warnAmt = checked.filter(function(f) { return f._amtValidationFail; }).length;
 
   el.style.display = checked.length > 0 ? '' : 'none';
   if (checked.length === 0) return;
 
   var countHtml = '<span class="amt-count">' + withAmt + '/' + checked.length + ' 张已识别</span>';
+  if (warnAmt > 0) {
+    countHtml += '<span class="amt-warn-count" title="' + warnAmt + ' 张发票金额校验失败（含税≠不含税+税额）">' + warnAmt + ' 张校验异常</span>';
+  }
   var mode = S.amtMode || 'tax';
   var amtHtml = '';
   if (mode === 'tax') {

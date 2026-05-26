@@ -428,6 +428,7 @@ function applyOcrResult(fileObj, ocrResult) {
         console.warn('[验证] 金额求和校验失败: 含税=' + info.amountTax +
           ', 不含税=' + info.amountNoTax + ', 税额=' + info.taxAmount +
           ', 验证=' + info.amountNoTax + '+' + info.taxAmount + '=' + _sum);
+        var _origAmtTax = info.amountTax, _origAmtNoTax = info.amountNoTax, _origTaxAmt = info.taxAmount;
         var VALID_RATES = [0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13];
         if (info.taxAmount > 0 && info.taxAmount < info.amountTax) {
           var _recalc = Math.round((info.amountTax - info.taxAmount) * 100) / 100;
@@ -440,6 +441,12 @@ function applyOcrResult(fileObj, ocrResult) {
           }
         }
         if (Math.abs(Math.round((info.amountNoTax + info.taxAmount) * 100) / 100 - info.amountTax) > 0.02) {
+          fileObj._amtValidationFail = {
+            amountTax: _origAmtTax,
+            amountNoTax: _origAmtNoTax,
+            taxAmount: _origTaxAmt,
+            source: 'ocr'
+          };
           info.amountTax = 0; info.amountNoTax = 0; info.taxAmount = 0;
         }
       }
@@ -520,6 +527,7 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
         console.warn('[PDF文字提取] 金额求和校验失败: 含税=' + info.amountTax +
           ', 不含税=' + info.amountNoTax + ', 税额=' + info.taxAmount +
           ', 验证=' + info.amountNoTax + '+' + info.taxAmount + '=' + _sum);
+        var _origAmtTax2 = info.amountTax, _origAmtNoTax2 = info.amountNoTax, _origTaxAmt2 = info.taxAmount;
         var VALID_RATES2 = [0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13];
         if (info.taxAmount > 0 && info.taxAmount < info.amountTax) {
           var _recalc2 = Math.round((info.amountTax - info.taxAmount) * 100) / 100;
@@ -532,6 +540,12 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
           }
         }
         if (Math.abs(Math.round((info.amountNoTax + info.taxAmount) * 100) / 100 - info.amountTax) > 0.02) {
+          fileObj._amtValidationFail = {
+            amountTax: _origAmtTax2,
+            amountNoTax: _origAmtNoTax2,
+            taxAmount: _origTaxAmt2,
+            source: 'pdfText'
+          };
           info.amountTax = 0; info.amountNoTax = 0; info.taxAmount = 0;
         }
       }
