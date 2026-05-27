@@ -376,10 +376,10 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32, use_jpeg: bool) -> Resu
         let (data_url, format) = if use_jpeg {
             let img = image::load_from_memory(&png_data)
                 .map_err(|e| format!("解码PNG失败: {}", e))?;
-            let mut jpeg_buf = Vec::new();
-            img.write_to(&mut jpeg_buf, image::ImageOutputFormat::Jpeg(80))
+            let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
                 .map_err(|e| format!("JPEG编码失败: {}", e))?;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf.into_inner());
             (format!("data:image/jpeg;base64,{}", b64), "jpeg".to_string())
         } else {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
@@ -456,6 +456,7 @@ pub(crate) fn render_pdf_pages_pdfium(pdf_path: &str, dpi: u32, use_jpeg: bool) 
 }
 
 fn convert_png_data_url_to_jpeg(data_url: &str) -> Result<(String, String), String> {
+    use base64::Engine;
     if !data_url.starts_with("data:image/png;base64,") {
         return Err("Not a PNG data URL".to_string());
     }
@@ -465,11 +466,11 @@ fn convert_png_data_url_to_jpeg(data_url: &str) -> Result<(String, String), Stri
     
     let img = image::load_from_memory(&png_data)
         .map_err(|e| format!("Image decode failed: {}", e))?;
-    let mut jpeg_buf = Vec::new();
-    img.write_to(&mut jpeg_buf, image::ImageOutputFormat::Jpeg(80))
+    let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
         .map_err(|e| format!("JPEG encode failed: {}", e))?;
     
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf.into_inner());
     Ok((format!("data:image/jpeg;base64,{}", b64), "jpeg".to_string()))
 }
 
