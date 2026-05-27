@@ -244,12 +244,15 @@ pub struct FileData {
 #[serde(rename_all = "camelCase")]
 pub struct RenderedPage {
     pub index: u32,
-    /// Base64-encoded PNG data URL
+    /// Base64-encoded image data URL (PNG or JPEG)
     pub image_data_url: String,
     pub width: u32,
     pub height: u32,
     /// Actual DPI used for rendering (may differ from requested DPI due to adaptive scaling)
     pub render_dpi: u32,
+    /// Image format: "png" or "jpeg"
+    #[serde(default)]
+    pub format: String,
 }
 
 /// Rendered PDF page with OCR result — avoids IPC round-trip for OCR.
@@ -276,10 +279,11 @@ pub struct RenderedOcrPage {
 // Note: previously used IBufferByteAccess COM interface, but buffer.cast::<IBufferByteAccess>()
 // fails with E_NOINTERFACE (0x80004002). Switched to DataReader which works reliably.
 
-/// Render PDF pages to PNG images using Windows.Data.Pdf API
+/// Render PDF pages to images using Windows.Data.Pdf API
 /// This handles PDFs with system font references that PDF.js cannot render
+/// - `use_jpeg`: if true, encode as JPEG for smaller size and faster transfer
 #[cfg(target_os = "windows")]
-pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedPage>, String> {
+pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32, use_jpeg: bool) -> Result<Vec<RenderedPage>, String> {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
@@ -305,7 +309,7 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
         .map_err(|e| format!("加载PDF失败: {}（文件可能受密码保护）", e))?;
 
     let page_count = doc.PageCount().map_err(|e| format!("获取页数失败: {}", e))?;
-    log::info!("WinRT PDF rendering: {} pages, dpi={}", page_count, dpi);
+    log::info!("WinRT PDF rendering: {} pages, dpi={}, jpeg={}", page_count, dpi, use_jpeg);
 
     let mut results = Vec::new();
 
@@ -320,18 +324,9 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
         // Size is in device-independent pixels (96 DPI base)
         let size = page.Size().map_err(|e| format!("获取第{}页尺寸失败: {}", i + 1, e))?;
         
-        // Adaptive DPI: small PDF pages need higher DPI so rendered pixels
-        // are sufficient for A4 print at RENDER_DPI (300)
-        // Ensure the longest side has at least MIN_RENDER_PX pixels
-        let min_render_px: u32 = 3508; // A4 long side at 300 DPI
-        let longest_side = size.Width.max(size.Height) as u32;
-        let base_pixels = longest_side * dpi / 96; // pixels at requested DPI
-        let effective_dpi = if base_pixels >= min_render_px {
-            dpi // already enough pixels
-        } else {
-            let needed = (min_render_px as f32 * 96.0 / longest_side as f32).ceil() as u32;
-            dpi.max(needed).min(1200)
-        };
+        // For preview, use requested DPI directly without adaptive scaling
+        // Adaptive scaling is only needed for print quality output
+        let effective_dpi = dpi;
         
         let scale = effective_dpi as f32 / 96.0;
         let dest_w = (size.Width * scale) as u32;
@@ -367,8 +362,8 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
             .get()
             .map_err(|e| format!("加载第{}页数据失败: {}", i + 1, e))?;
 
-        let mut data = vec![0u8; stream_size as usize];
-        reader.ReadBytes(&mut data)
+        let mut png_data = vec![0u8; stream_size as usize];
+        reader.ReadBytes(&mut png_data)
             .map_err(|e| format!("读取第{}页字节失败: {}", i + 1, e))?;
 
         // Explicitly release per-page COM objects
@@ -377,8 +372,19 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
         drop(stream);
         drop(page);
 
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        let data_url = format!("data:image/png;base64,{}", b64);
+        // Encode to JPEG if requested
+        let (data_url, format) = if use_jpeg {
+            let img = image::load_from_memory(&png_data)
+                .map_err(|e| format!("解码PNG失败: {}", e))?;
+            let mut jpeg_buf = Vec::new();
+            img.write_to(&mut jpeg_buf, image::ImageOutputFormat::Jpeg(80))
+                .map_err(|e| format!("JPEG编码失败: {}", e))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
+            (format!("data:image/jpeg;base64,{}", b64), "jpeg".to_string())
+        } else {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+            (format!("data:image/png;base64,{}", b64), "png".to_string())
+        };
 
         results.push(RenderedPage {
             index: i,
@@ -386,9 +392,10 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
             width: dest_w,
             height: dest_h,
             render_dpi: effective_dpi,
+            format,
         });
 
-        log::info!("Rendered page {} ({}x{}) @ {}dpi", i + 1, dest_w, dest_h, effective_dpi);
+        log::info!("Rendered page {} ({}x{}) @ {}dpi, format={}", i + 1, dest_w, dest_h, effective_dpi, format);
     }
 
     // Explicitly release document-level COM objects before ComGuard drops.
@@ -401,7 +408,7 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedP
     Ok(results)
 }
 
-pub(crate) fn render_pdf_pages_pdfium(pdf_path: &str, dpi: u32) -> Result<Vec<RenderedPage>, String> {
+pub(crate) fn render_pdf_pages_pdfium(pdf_path: &str, dpi: u32, use_jpeg: bool) -> Result<Vec<RenderedPage>, String> {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
@@ -415,15 +422,55 @@ pub(crate) fn render_pdf_pages_pdfium(pdf_path: &str, dpi: u32) -> Result<Vec<Re
 
     let images = crate::pdfium_print::render_pdf_to_images(&pdf_bytes, dpi)?;
 
-    let results: Vec<RenderedPage> = images.into_iter().map(|img| RenderedPage {
-        index: img.index,
-        image_data_url: img.image_data_url,
-        width: img.width,
-        height: img.height,
-        render_dpi: img.render_dpi,
+    let results: Vec<RenderedPage> = images.into_iter().map(|img| {
+        // Convert PNG to JPEG if requested
+        if use_jpeg && img.image_data_url.starts_with("data:image/png;base64,") {
+            let (data_url, format) = match convert_png_data_url_to_jpeg(&img.image_data_url) {
+                Ok((url, fmt)) => (url, fmt),
+                Err(e) => {
+                    log::warn!("JPEG conversion failed, falling back to PNG: {}", e);
+                    (img.image_data_url, "png".to_string())
+                }
+            };
+            RenderedPage {
+                index: img.index,
+                image_data_url: data_url,
+                width: img.width,
+                height: img.height,
+                render_dpi: img.render_dpi,
+                format,
+            }
+        } else {
+            RenderedPage {
+                index: img.index,
+                image_data_url: img.image_data_url,
+                width: img.width,
+                height: img.height,
+                render_dpi: img.render_dpi,
+                format: "png".to_string(),
+            }
+        }
     }).collect();
 
     Ok(results)
+}
+
+fn convert_png_data_url_to_jpeg(data_url: &str) -> Result<(String, String), String> {
+    if !data_url.starts_with("data:image/png;base64,") {
+        return Err("Not a PNG data URL".to_string());
+    }
+    let base64_data = data_url.strip_prefix("data:image/png;base64,").ok_or("Invalid data URL")?;
+    let png_data = base64::engine::general_purpose::STANDARD.decode(base64_data)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
+    
+    let img = image::load_from_memory(&png_data)
+        .map_err(|e| format!("Image decode failed: {}", e))?;
+    let mut jpeg_buf = Vec::new();
+    img.write_to(&mut jpeg_buf, image::ImageOutputFormat::Jpeg(80))
+        .map_err(|e| format!("JPEG encode failed: {}", e))?;
+    
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
+    Ok((format!("data:image/jpeg;base64,{}", b64), "jpeg".to_string()))
 }
 
 pub(crate) fn check_winrt_pdf_available() -> bool {

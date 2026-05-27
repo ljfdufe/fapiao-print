@@ -130,22 +130,23 @@ fn get_printers() -> Result<Vec<PrinterInfo>, String> {
 }
 
 /// Render PDF pages to images using Windows native API
+/// - `use_jpeg`: if true, encode as JPEG for faster loading (default: true for preview)
 #[command]
-fn render_pdf_pages(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedPage>, String> {
+fn render_pdf_pages(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::render_pdf_pages(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI))
+    pdf_engine::render_pdf_pages(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI), use_jpeg.unwrap_or(true))
 }
 
 #[command]
-fn render_pdf_pages_pdfium(pdf_path: String, dpi: Option<u32>) -> Result<Vec<RenderedPage>, String> {
+fn render_pdf_pages_pdfium(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::render_pdf_pages_pdfium(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI))
+    pdf_engine::render_pdf_pages_pdfium(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI), use_jpeg.unwrap_or(true))
 }
 
 #[command]

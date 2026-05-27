@@ -17,7 +17,8 @@ var _winrtPdfAvailable = true; // Set to false at startup if WinRT PDF component
 // =====================================================
 var PAPER = { A4:{w:210,h:297}, A5:{w:148,h:210}, B5:{w:176,h:250}, letter:{w:216,h:279}, legal:{w:216,h:356} };
 var MM2PX = 96 / 25.4;
-var PDF_RENDER_DPI = 300;  // Must match Rust RENDER_DPI — validated at startup via get_config
+var PDF_RENDER_DPI = 300;  // Print/save DPI — Must match Rust RENDER_DPI
+var PDF_PREVIEW_DPI = 150;  // Preview DPI — faster loading, lower resolution
 var MIN_RENDER_PX = 3508;  // A4 long side at 300 DPI — minimum rendered pixels
 var WHITE_THRESHOLD = 245; // Pixel value threshold for white-edge trimming
 
@@ -1063,7 +1064,7 @@ function loadFileFromDataUrlFast(fd) {
       if (isTauri && invoke && filePath) {
         var renderFn = _winrtPdfAvailable ? 'render_pdf_pages' : 'render_pdf_pages_pdfium';
         var renderLabel = _winrtPdfAvailable ? 'WinRT' : 'PDFium';
-        invoke(renderFn, { pdfPath: filePath, dpi: PDF_RENDER_DPI }).then(async function(pages) {
+        invoke(renderFn, { pdfPath: filePath, dpi: PDF_PREVIEW_DPI, useJpeg: true }).then(async function(pages) {
           if (pages && pages.length > 0) {
             var results = [];
             for (var p = 0; p < pages.length; p++) {
@@ -1114,7 +1115,7 @@ function loadFileFromDataUrlFast(fd) {
           if (renderFn === 'render_pdf_pages') {
             _winrtPdfAvailable = false;
             console.warn('[PDF] WinRT failed, trying PDFium fallback...');
-            invoke('render_pdf_pages_pdfium', { pdfPath: filePath, dpi: PDF_RENDER_DPI }).then(async function(pages2) {
+            invoke('render_pdf_pages_pdfium', { pdfPath: filePath, dpi: PDF_PREVIEW_DPI, useJpeg: true }).then(async function(pages2) {
               if (pages2 && pages2.length > 0) {
                 var results2 = [];
                 for (var p2 = 0; p2 < pages2.length; p2++) {
