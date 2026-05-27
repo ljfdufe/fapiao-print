@@ -1084,40 +1084,52 @@ function loadFileFromDataUrlFast(fd) {
             // PDF 文字层提取（默认关闭以提高加载速度）
             if (S.feat.pdfTextEnabled) {
               if (results.length > 0) {
-                var pdfPath = results[0]._pdfPath;
-                var pageIndices = results.map(function(r) { return r._pdfPageIdx; });
-                invoke('extract_pdf_texts', {
-                  pdfPath: pdfPath,
-                  pageIndices: pageIndices
-                }).then(function(pdfTextMap) {
-                  results.forEach(function(r) {
-                    var pdfText = pdfTextMap[r._pdfPageIdx];
-                    if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                      applyPdfTextResult(r, pdfText);
-                      updateFileItem(r);
-                      updateAmountSummary();
-                    } else if (hasOcr && S.feat.ocrEnabled) {
-                      console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
-                      applyOcrAsync(r, r.previewUrl);
-                    }
-                  });
-                }).catch(function(err) {
-                  console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
-                  // Fallback to individual extraction
-                  results.forEach(function(r) {
-                    invoke('extract_pdf_text', {
-                      pdfPath: r._pdfPath,
-                      pageIdx: r._pdfPageIdx
-                    }).then(function(pdfText) {
+                // Group results by PDF path (handle multiple different PDFs at once)
+                var resultsByPdfPath = {};
+                results.forEach(function(r) {
+                  var path = r._pdfPath;
+                  if (!resultsByPdfPath[path]) resultsByPdfPath[path] = [];
+                  resultsByPdfPath[path].push(r);
+                });
+                
+                // Process each PDF file in parallel
+                Object.keys(resultsByPdfPath).forEach(function(pdfPath) {
+                  var pdfResults = resultsByPdfPath[pdfPath];
+                  var pageIndices = pdfResults.map(function(r) { return r._pdfPageIdx; });
+                  
+                  invoke('extract_pdf_texts', {
+                    pdfPath: pdfPath,
+                    pageIndices: pageIndices
+                  }).then(function(pdfTextMap) {
+                    pdfResults.forEach(function(r) {
+                      var pdfText = pdfTextMap[r._pdfPageIdx];
                       if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
                         applyPdfTextResult(r, pdfText);
                         updateFileItem(r);
                         updateAmountSummary();
                       } else if (hasOcr && S.feat.ocrEnabled) {
+                        console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
                         applyOcrAsync(r, r.previewUrl);
                       }
-                    }).catch(function(e) {
-                      if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                    });
+                  }).catch(function(err) {
+                    console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
+                    // Fallback to individual extraction
+                    pdfResults.forEach(function(r) {
+                      invoke('extract_pdf_text', {
+                        pdfPath: r._pdfPath,
+                        pageIdx: r._pdfPageIdx
+                      }).then(function(pdfText) {
+                        if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+                          applyPdfTextResult(r, pdfText);
+                          updateFileItem(r);
+                          updateAmountSummary();
+                        } else if (hasOcr && S.feat.ocrEnabled) {
+                          applyOcrAsync(r, r.previewUrl);
+                        }
+                      }).catch(function(e) {
+                        if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                      });
                     });
                   });
                 });
@@ -1155,38 +1167,50 @@ function loadFileFromDataUrlFast(fd) {
                 resolve(results2.length === 1 ? results2[0] : results2);
                 if (S.feat.pdfTextEnabled) {
                   if (results2.length > 0) {
-                    var pdfPath2 = results2[0]._pdfPath;
-                    var pageIndices2 = results2.map(function(r) { return r._pdfPageIdx; });
-                    invoke('extract_pdf_texts', {
-                      pdfPath: pdfPath2,
-                      pageIndices: pageIndices2
-                    }).then(function(pdfTextMap2) {
-                      results2.forEach(function(r) {
-                        var pdfText2 = pdfTextMap2[r._pdfPageIdx];
-                        if (pdfText2 && pdfText2.lines && pdfText2.lines.length > 0) {
-                          applyPdfTextResult(r, pdfText2);
-                          updateFileItem(r);
-                          updateAmountSummary();
-                        } else if (hasOcr && S.feat.ocrEnabled) {
-                          applyOcrAsync(r, r.previewUrl);
-                        }
-                      });
-                    }).catch(function(err) {
-                      console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
-                      // Fallback
-                      results2.forEach(function(r) {
-                        invoke('extract_pdf_text', {
-                          pdfPath: r._pdfPath, pageIdx: r._pdfPageIdx
-                        }).then(function(pdfText) {
-                          if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                            applyPdfTextResult(r, pdfText);
+                    // Group results by PDF path (handle multiple different PDFs at once)
+                    var resultsByPdfPath2 = {};
+                    results2.forEach(function(r) {
+                      var path = r._pdfPath;
+                      if (!resultsByPdfPath2[path]) resultsByPdfPath2[path] = [];
+                      resultsByPdfPath2[path].push(r);
+                    });
+                    
+                    // Process each PDF file in parallel
+                    Object.keys(resultsByPdfPath2).forEach(function(pdfPath2) {
+                      var pdfResults2 = resultsByPdfPath2[pdfPath2];
+                      var pageIndices2 = pdfResults2.map(function(r) { return r._pdfPageIdx; });
+                      
+                      invoke('extract_pdf_texts', {
+                        pdfPath: pdfPath2,
+                        pageIndices: pageIndices2
+                      }).then(function(pdfTextMap2) {
+                        pdfResults2.forEach(function(r) {
+                          var pdfText2 = pdfTextMap2[r._pdfPageIdx];
+                          if (pdfText2 && pdfText2.lines && pdfText2.lines.length > 0) {
+                            applyPdfTextResult(r, pdfText2);
                             updateFileItem(r);
                             updateAmountSummary();
                           } else if (hasOcr && S.feat.ocrEnabled) {
                             applyOcrAsync(r, r.previewUrl);
                           }
-                        }).catch(function() {
-                          if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                        });
+                      }).catch(function(err) {
+                        console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
+                        // Fallback
+                        pdfResults2.forEach(function(r) {
+                          invoke('extract_pdf_text', {
+                            pdfPath: r._pdfPath, pageIdx: r._pdfPageIdx
+                          }).then(function(pdfText) {
+                            if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+                              applyPdfTextResult(r, pdfText);
+                              updateFileItem(r);
+                              updateAmountSummary();
+                            } else if (hasOcr && S.feat.ocrEnabled) {
+                              applyOcrAsync(r, r.previewUrl);
+                            }
+                          }).catch(function() {
+                            if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+                          });
                         });
                       });
                     });
