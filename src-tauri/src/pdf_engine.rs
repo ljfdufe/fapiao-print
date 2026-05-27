@@ -386,6 +386,8 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32, use_jpeg: bool) -> Resu
             (format!("data:image/png;base64,{}", b64), "png".to_string())
         };
 
+        log::info!("Rendered page {} ({}x{}) @ {}dpi, format={}", i + 1, dest_w, dest_h, effective_dpi, format);
+        
         results.push(RenderedPage {
             index: i,
             image_data_url: data_url,
@@ -394,8 +396,6 @@ pub(crate) fn render_pdf_pages(pdf_path: &str, dpi: u32, use_jpeg: bool) -> Resu
             render_dpi: effective_dpi,
             format,
         });
-
-        log::info!("Rendered page {} ({}x{}) @ {}dpi, format={}", i + 1, dest_w, dest_h, effective_dpi, format);
     }
 
     // Explicitly release document-level COM objects before ComGuard drops.
