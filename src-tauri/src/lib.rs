@@ -521,6 +521,8 @@ async fn pdfium_vector_print(
     app: tauri::AppHandle,
     request: LayoutRenderRequest,
     printer_name: Option<String>,
+    copies: u32,
+    duplex: bool,
 ) -> Result<pdf_engine::PdfResult, String> {
     use std::sync::atomic::Ordering;
 
@@ -534,8 +536,6 @@ async fn pdfium_vector_print(
             .ok_or("未找到默认打印机，请在系统设置中配置打印机，或在打印设置中手动选择。")?,
     };
 
-    let copies = request.settings.copies;
-    let duplex = request.settings.duplex;
     let color_mode = request.settings.color_mode.clone();
     let paper_w = request.settings.paper_w;
     let paper_h = request.settings.paper_h;
