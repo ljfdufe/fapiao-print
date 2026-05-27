@@ -1436,10 +1436,41 @@ pub struct PdfTextResult {
 /// For scanned PDFs (no text layer), returns an empty PdfTextResult.
 /// ~5ms per page (pure data parsing, no AI inference).
 pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, String> {
-    use lopdf::Object;
-
     let doc = lopdf::Document::load(pdf_path)
         .map_err(|e| format!("PDF加载失败: {}", e))?;
+    extract_pdf_text_from_doc(&doc, page_idx)
+}
+
+/// Extract text from multiple pages in a single PDF document.
+/// Only opens the PDF once and processes pages in parallel using rayon.
+/// ~5ms per page, with parallelism for multi-page PDFs.
+pub fn extract_pdf_texts(pdf_path: &str, page_indices: &[u32]) -> Result<std::collections::HashMap<u32, PdfTextResult>, String> {
+    use rayon::prelude::*;
+    
+    let doc = lopdf::Document::load(pdf_path)
+        .map_err(|e| format!("PDF加载失败: {}", e))?;
+    
+    // Process pages in parallel
+    let results: Vec<(u32, Result<PdfTextResult, String>)> = page_indices
+        .par_iter()
+        .map(|&page_idx| {
+            let result = extract_pdf_text_from_doc(&doc, page_idx);
+            (page_idx, result)
+        })
+        .collect();
+    
+    // Collect into HashMap, first error wins
+    let mut map = std::collections::HashMap::new();
+    for (page_idx, result) in results {
+        map.insert(page_idx, result?);
+    }
+    
+    Ok(map)
+}
+
+/// Helper function to extract text from a single page of an already-loaded PDF document.
+fn extract_pdf_text_from_doc(doc: &lopdf::Document, page_idx: u32) -> Result<PdfTextResult, String> {
+    use lopdf::Object;
 
     let pages: std::collections::BTreeMap<u32, lopdf::ObjectId> = doc.get_pages();
     let page_id = *pages.get(&(page_idx + 1)) // lopdf pages are 1-indexed

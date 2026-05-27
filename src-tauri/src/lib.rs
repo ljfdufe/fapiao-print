@@ -236,6 +236,19 @@ async fn extract_pdf_text(pdf_path: String, page_idx: u32) -> Result<PdfTextResu
     .map_err(|e| format!("PDF文字提取任务失败: {}", e))?
 }
 
+/// Extract text from multiple pages in a PDF in parallel, with only one PDF file open.
+/// ~5ms per page, with parallelism (rayon) for multi-page PDFs.
+/// Uses `spawn_blocking` to run CPU-intensive PDF parsing off the IPC thread.
+#[command]
+async fn extract_pdf_texts(pdf_path: String, page_indices: Vec<u32>) -> Result<std::collections::HashMap<u32, PdfTextResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::extract_pdf_texts(&pdf_path, &page_indices)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("PDF文字提取任务失败: {}", e))?
+}
+
 /// Get app version from Cargo.toml (compiled in at build time)
 #[command]
 fn get_app_version() -> String {
@@ -1144,6 +1157,7 @@ pub fn run() {
         ocr_pdf_page,
         check_ocr_available,
         extract_pdf_text,
+        extract_pdf_texts,
         get_app_version,
         get_config,
         get_temp_dir,
@@ -1174,6 +1188,7 @@ pub fn run() {
         open_file,
         check_ocr_available,
         extract_pdf_text,
+        extract_pdf_texts,
         get_app_version,
         get_config,
         get_temp_dir,
