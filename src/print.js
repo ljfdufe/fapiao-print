@@ -125,7 +125,14 @@ function buildLayoutRequest(files, settings) {
     pageSpecs.push({ slots: slots });
   }
 
-  return { files: fileSpecs, pages: pageSpecs, settings: settings };
+  // 排除纯打印机参数，避免切换打印机/份数等操作错误地导致缓存失效
+  // 这些字段仅影响打印方式，不影响 PDF 内容布局
+  var _cacheExclude = { printerName:1, copies:1, duplex:1, collate:1 };
+  var layoutSettings = {};
+  for (var k in settings) {
+    if (!(k in _cacheExclude)) layoutSettings[k] = settings[k];
+  }
+  return { files: fileSpecs, pages: pageSpecs, settings: layoutSettings };
 }
 
 /**
@@ -400,7 +407,9 @@ async function doPdfiumPrint(files, s) {
       document.getElementById('loadingText').textContent = '正在生成PDF并渲染...';
       var result = await invoke('pdfium_vector_print', {
         request: layoutReq,
-        printerName: s.printerName || null
+        printerName: s.printerName || null,
+        copies: s.copies || 1,
+        duplex: s.duplex || false
       });
       if (unlisten) unlisten();
       hideLoading();
