@@ -15,13 +15,14 @@ function deepEqual(a, b) {
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object' || a === null || b === null) return false;
   
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
+  var keysA = Object.keys(a);
+  var keysB = Object.keys(b);
   
   if (keysA.length !== keysB.length) return false;
   
-  for (const key of keysA) {
-    if (!keysB.includes(key)) return false;
+  for (var ki = 0; ki < keysA.length; ki++) {
+    var key = keysA[ki];
+    if (keysB.indexOf(key) === -1) return false;
     if (!deepEqual(a[key], b[key])) return false;
   }
   
@@ -293,13 +294,12 @@ async function doSumatraPrint(files, s) {
   showLoading('正在准备打印...');
   var unlisten = await listenPdfProgress();
   try {
-    var layoutReq = buildLayoutRequest(files, s);
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
       var tempDir = await invoke('get_temp_dir');
       var outputPath = tempDir + '\\fapiao_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
-        request: layoutReq,
+        request: currentRequest,
         outputPath: outputPath,
         directPrint: false,
         printerName: null,
@@ -307,7 +307,7 @@ async function doSumatraPrint(files, s) {
       });
       if (unlisten) unlisten();
       if (result.success) {
-        updatePdfCache(layoutReq, result.pdfPath);
+        updatePdfCache(currentRequest, result.pdfPath);
         showLoading('正在通过SumatraPDF打印...');
         try {
           var printResult = await invoke('sumatrapdf_print', {
@@ -394,7 +394,7 @@ async function doPdfiumPrint(files, s) {
   showLoading('正在准备静默打印（PDFium）...');
   var unlisten = await listenPdfProgress();
   try {
-    var layoutReq = buildLayoutRequest(files, s);
+    var layoutReq = currentRequest;
 
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF并渲染...';
@@ -405,7 +405,7 @@ async function doPdfiumPrint(files, s) {
       if (unlisten) unlisten();
       hideLoading();
       if (result.success) {
-        if (result.pdfPath) updatePdfCache(layoutReq, result.pdfPath);
+        if (result.pdfPath) updatePdfCache(currentRequest, result.pdfPath);
         toast('\uD83D\uDCA8 ' + result.message);
       } else {
         console.warn('PDFium print failed, falling back to SumatraPDF:', result.message);
@@ -451,7 +451,7 @@ async function doPdfReaderPrint(files, s) {
   showLoading('正在准备打印...');
   var unlisten = await listenPdfProgress();
   try {
-    var layoutReq = buildLayoutRequest(files, s);
+    var layoutReq = currentRequest;
 
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
@@ -466,7 +466,7 @@ async function doPdfReaderPrint(files, s) {
       });
       if (unlisten) unlisten();
       if (result.success) {
-        updatePdfCache(layoutReq, result.pdfPath);
+        updatePdfCache(currentRequest, result.pdfPath);
         showLoading('正在通过PDF阅读器打印...');
         try {
           var printResult = await invoke('print_pdf_file', {
@@ -562,7 +562,7 @@ async function savePdf() {
   showLoading('正在准备保存...');
   var unlisten = await listenPdfProgress();
   try {
-    var layoutReq = buildLayoutRequest(files, s);
+    var layoutReq = currentRequest;
 
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF...';
@@ -580,7 +580,7 @@ async function savePdf() {
       hideLoading();
       if (result.success) {
         // 更新缓存（使用临时路径，不是用户保存路径）
-        updatePdfCache(layoutReq, tempPath);
+        updatePdfCache(currentRequest, tempPath);
         
         // 复制到用户保存路径
         await invoke('copy_file', {

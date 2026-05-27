@@ -680,7 +680,6 @@ async function processFiles(files) {
 // Strategy: skeleton placeholders (stable layout) + parallel background load + batch render every 3 files.
 async function processFilesIncremental(paths) {
   var total = paths.length;
-  var completed = 0;
   var added = 0;
   var startTime = Date.now();
   _loadingBatchActive = true;
