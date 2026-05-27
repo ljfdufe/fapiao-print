@@ -8,8 +8,6 @@ var isTauri = window.__TAURI_INTERNALS__ !== undefined;
 var invoke  = isTauri ? window.__TAURI_INTERNALS__.invoke : null;
 var hasOcr  = false; // Set to true at startup if OCR feature is available
 var APP_VERSION = ''; // Filled at startup from Rust get_app_version()
-var _pdfDirty = true; // PDF dirty flag (needs regeneration)
-var _lastPdfPath = null; // Last generated PDF path for reuse
 var _winrtPdfAvailable = true; // Set to false at startup if WinRT PDF component is missing
 
 // =====================================================
@@ -776,7 +774,6 @@ async function processFilesIncremental(paths) {
       }
     }
 
-    _pdfDirty = true;
     renderFileList(); updatePreview(); updatePrintBtn();
     await nextFrame();
   }
@@ -1412,12 +1409,12 @@ function setAllCopies(e, n) {
   renderFileList();
   updatePreview();
 }
-function togCheck(i) { S.files[i].checked = !S.files[i].checked; _pdfDirty = true; renderFileList(); updatePreview(); }
-function selectAll() { S.files.forEach(function(f) { f.checked = true; }); _pdfDirty = true; renderFileList(); updatePreview(); }
-function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); _pdfDirty = true; renderFileList(); updatePreview(); }
-function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
-function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
-function rotFile(i) { S.files[i].rotation = (S.files[i].rotation + 90) % 360; _pdfDirty = true; renderFileList(); updatePreview(); }
+function togCheck(i) { S.files[i].checked = !S.files[i].checked; renderFileList(); updatePreview(); }
+function selectAll() { S.files.forEach(function(f) { f.checked = true; }); renderFileList(); updatePreview(); }
+function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); renderFileList(); updatePreview(); }
+function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); renderFileList(); updatePreview(); updatePrintBtn(); }
+function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; renderFileList(); updatePreview(); updatePrintBtn(); }
+function rotFile(i) { S.files[i].rotation = (S.files[i].rotation + 90) % 360; renderFileList(); updatePreview(); }
 function ocrFile(i) {
   var f = S.files[i];
   if (f._loading || f._ocrPending) return;
@@ -1443,7 +1440,7 @@ function ocrAll() {
   toastLoading('识别中，共 ' + targets.length + ' 张...');
   targets.forEach(function(f) { applyOcrAsync(f, f.previewUrl); });
 }
-function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
+function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; renderFileList(); updatePreview(); updatePrintBtn(); }
 
 // Click file item → navigate preview to the page containing this invoice
 function clickFileItem(idx, event) {

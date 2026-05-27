@@ -105,7 +105,7 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 - **渲染流程**: `FPDF_LoadMemDocument` → 逐页 `FPDF_RenderPage(printer_dc)` → 打印机原生 DPI
 - **DEVMODEW**: `build_dev_mode()` + `infer_paper_size()` 标准纸映射，自定义纸用 `DMPAPER_USER`
 - **下载机制**: `AtomicBool DOWNLOAD_CANCELLED` 全局取消标志，`cancel_download` 命令通知 Rust 端
-- **缓存复用**: `_pdfDirty` + `_lastPdfPath` 统一三个打印渠道（PDFium / SumatraPDF / PDF阅读器）
+- **缓存复用**: 智能缓存 `deepEqual` + `canUseCachedPdf` 统一三个打印渠道（PDFium / SumatraPDF / PDF阅读器）
 - **DLL 位置**: `{exe}/tools/pdfium.dll`（与 SumatraPDF.exe 同目录）
 - **下载源**: `bblanchon/pdfium-binaries` via `gh-proxy.com` 加速
 

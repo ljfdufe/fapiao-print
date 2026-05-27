@@ -400,7 +400,6 @@ function onSlotMouseUp(e) {
   document.removeEventListener('mousemove', onSlotMouseMove);
   document.removeEventListener('mouseup', onSlotMouseUp);
   if (didMove) {
-    _pdfDirty = true;
     updatePreview();
     updateAdjPanel();
   }
