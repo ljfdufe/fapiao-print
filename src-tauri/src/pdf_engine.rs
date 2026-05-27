@@ -5671,7 +5671,7 @@ fn generate_pdf_passthrough(
 
         // Add slot borders if enabled
         if request.settings.border {
-            if let Some(border_ops) = build_border_ops_lopdf(&slot_positions) {
+            if let Some(border_ops) = build_border_ops_lopdf(&slot_positions, &slot_adjustments, &page_form_xobjs, &request.settings) {
                 if !content_bytes.is_empty() {
                     content_bytes.push(b'\n');
                 }
@@ -5895,13 +5895,17 @@ fn build_cutline_ops_lopdf(
     Some(lopdf::content::Content { operations: ops })
 }
 
-/// Draw borders around each slot (solid lines).
+/// Draw borders around each invoice's visual boundary (follows per-slot adjustments).
+/// Borders are drawn at the actual image position, not the slot boundary.
 fn build_border_ops_lopdf(
     slot_positions: &[LayoutSlotMm],
+    slot_adjustments: &[SlotAdjustment],
+    form_xobjs: &[(usize, lopdf::ObjectId, f32, f32)],  // (layout_slot_idx, _, src_w_pt, src_h_pt)
+    settings: &RenderSettings,
 ) -> Option<lopdf::content::Content> {
     use lopdf::content::Operation;
 
-    if slot_positions.is_empty() {
+    if form_xobjs.is_empty() {
         return None;
     }
 
@@ -5921,11 +5925,62 @@ fn build_border_ops_lopdf(
 
     ops.push(Operation { operator: "G".into(), operands: vec![lopdf::Object::Real(0.0)] });
 
-    for slot in slot_positions {
-        let x1 = slot.x_mm * MM_TO_PT;
-        let y1 = slot.y_mm * MM_TO_PT;
-        let x2 = (slot.x_mm + slot.w_mm) * MM_TO_PT;
-        let y2 = (slot.y_mm + slot.h_mm) * MM_TO_PT;
+    for (adj_idx, (layout_slot_idx, _xobj_id, src_w_pt, src_h_pt)) in form_xobjs.iter().enumerate() {
+        let slot = &slot_positions[*layout_slot_idx];
+        let slot_w_pt = slot.w_mm * MM_TO_PT;
+        let slot_h_pt = slot.h_mm * MM_TO_PT;
+
+        let adj = if adj_idx < slot_adjustments.len() {
+            &slot_adjustments[adj_idx]
+        } else {
+            continue;
+        };
+        let rotation = adj.rotation;
+        let rot = ((rotation % 360) + 360) % 360;
+
+        // For 90°/270° rotation, visual dimensions swap (width↔height)
+        let (vis_w, vis_h) = if rot == 90 || rot == 270 {
+            (*src_h_pt, *src_w_pt)
+        } else {
+            (*src_w_pt, *src_h_pt)
+        };
+
+        // Compute scale to fit in slot based on visual dimensions
+        let (mut scale_x, mut scale_y) = match settings.fit_mode.as_str() {
+            "fill" => (slot_w_pt / vis_w, slot_h_pt / vis_h),
+            "original" => (1.0, 1.0),
+            "custom" => {
+                let contain_s = (slot_w_pt / vis_w).min(slot_h_pt / vis_h);
+                let s = contain_s * settings.custom_scale;
+                (s, s)
+            }
+            _ => {
+                let s = (slot_w_pt / vis_w).min(slot_h_pt / vis_h);
+                (s, s)
+            }
+        };
+
+        // Per-slot scale override
+        if adj.scale != 1.0 {
+            scale_x *= adj.scale;
+            scale_y *= adj.scale;
+        }
+
+        // Calculate visual boundary (bottom-up coordinates, PDF standard)
+        let draw_w = vis_w * scale_x;
+        let draw_h = vis_h * scale_y;
+        let mut offset_x = slot.x_mm * MM_TO_PT + (slot_w_pt - draw_w) / 2.0;
+        let mut offset_y = slot.y_mm * MM_TO_PT + (slot_h_pt - draw_h) / 2.0;
+
+        // Per-slot offset override
+        if adj.offset_x != 0.0 { offset_x += adj.offset_x * MM_TO_PT; }
+        if adj.offset_y != 0.0 { offset_y -= adj.offset_y * MM_TO_PT; }  // JS Y+ down, PDF Y+ up
+
+        // Draw rectangle at invoice visual boundary
+        let x1 = offset_x;
+        let y1 = offset_y;
+        let x2 = offset_x + draw_w;
+        let y2 = offset_y + draw_h;
 
         ops.push(Operation { operator: "m".into(), operands: vec![
             lopdf::Object::Real(x1),

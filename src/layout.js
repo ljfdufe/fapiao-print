@@ -138,7 +138,6 @@ function renderPage(pageFiles, pi, total, s) {
       if (s.fitMode === 'fill') fit = 'cover';
       else if (s.fitMode === 'original') fit = 'none';
       else if (s.fitMode === 'custom') fit = 'contain';
-      var bdr = s.border ? 'outline:1px solid #000;outline-offset:-1px;' : '';
       var transforms = '';
       // Apply per-slot scale first (before fit-mode custom scale and rotation)
       if (perScale !== 1) transforms += 'scale(' + perScale + ') ';
@@ -151,17 +150,33 @@ function renderPage(pageFiles, pi, total, s) {
         var tyPx = perOffY * MM2PX * scale;
         transforms = 'translate(' + txPx.toFixed(1) + 'px, ' + tyPx.toFixed(1) + 'px) ' + transforms;
       }
-      // Rotation sizing fix:
-      var isRotated90 = (rot === 90 || rot === 270);
-      var sizeStyle = '';
+      // Calculate contained image dimensions for border to follow invoice
+      var imgObjW = f.ow || 1;
+      var imgObjH = f.oh || 1;
+      var containedW, containedH;
       if (s.fitMode === 'original') {
-        sizeStyle = '';
-      } else if (isRotated90) {
-        sizeStyle = 'max-width:' + imgH + 'px;max-height:' + imgW + 'px;';
+        containedW = imgObjW;
+        containedH = imgObjH;
+      } else if (s.fitMode === 'fill') {
+        containedW = imgW;
+        containedH = imgH;
       } else {
-        sizeStyle = 'max-width:100%;max-height:100%;';
+        // contain / custom: image fits in slot maintaining aspect ratio
+        var fitScale = Math.min(imgW / imgObjW, imgH / imgObjH);
+        containedW = imgObjW * fitScale;
+        containedH = imgObjH * fitScale;
       }
-      inner = '<img src="' + src + '" style="' + sizeStyle + 'object-fit:' + fit + ';' + filt + (transforms ? 'transform:' + transforms + ';' : '') + '">';
+      // Image wrapper: explicit dimensions, same transforms, optional border
+      var wrapperStyle = 'width:' + containedW.toFixed(1) + 'px;height:' + containedH.toFixed(1) + 'px;';
+      wrapperStyle += 'position:absolute;';
+      wrapperStyle += 'left:' + ((imgW - containedW) / 2).toFixed(1) + 'px;';
+      wrapperStyle += 'top:' + ((imgH - containedH) / 2).toFixed(1) + 'px;';
+      wrapperStyle += 'transform-origin:center center;';
+      if (transforms) wrapperStyle += 'transform:' + transforms + ';';
+      if (s.border) wrapperStyle += 'outline:1px solid #000;outline-offset:-1px;';
+      // Image fills wrapper
+      var imgStyle = 'width:100%;height:100%;object-fit:' + fit + ';' + filt;
+      inner = '<div style="' + wrapperStyle + '"><img src="' + src + '" style="' + imgStyle + '"></div>';
       if (s.number) inner += '<div class="slot-num">' + (pi * s.rows * s.cols + i + 1) + '</div>';
       if (s.watermark && s.watermarkText) {
         var ws = s.watermarkSize * MM2PX * scale;
@@ -172,7 +187,7 @@ function renderPage(pageFiles, pi, total, s) {
       inner += '<div class="slot-handle slot-handle-tr" data-handle="tr"></div>';
       inner += '<div class="slot-handle slot-handle-bl" data-handle="bl"></div>';
       inner += '<div class="slot-handle slot-handle-br" data-handle="br"></div>';
-      html += '<div class="invoice-slot' + selClass + '" data-slot-idx="' + i + '" style="position:absolute;left:' + imgX + 'px;top:' + imgY + 'px;width:' + imgW + 'px;height:' + imgH + 'px;' + bdr + '">' + inner + '</div>';
+      html += '<div class="invoice-slot' + selClass + '" data-slot-idx="' + i + '" style="position:absolute;left:' + imgX + 'px;top:' + imgY + 'px;width:' + imgW + 'px;height:' + imgH + 'px;">' + inner + '</div>';
     } else {
       inner = '<div class="slot-empty">空</div>';
       html += '<div class="invoice-slot' + selClass + '" data-slot-idx="' + i + '" style="position:absolute;left:' + imgX + 'px;top:' + imgY + 'px;width:' + imgW + 'px;height:' + imgH + 'px">' + inner + '</div>';
