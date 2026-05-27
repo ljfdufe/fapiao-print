@@ -1,14 +1,25 @@
 # 📋 更新日志
 
-## v1.10.5 — 预览加载速度优化（2-3x 更快）
+## v1.10.5 — 预览加速 + 批量加载 + 智能缓存 + IPC 异步化
 
-### 🔧 优化
+### 🚀 新功能
 
-- **预览加载速度大幅提升**（2-3x）：PDF 文件预览加载性能优化，包括降低预览 DPI（150 vs 300）和 JPEG 编码支持，渲染像素减少 75%，文件体积减少 60-80%，整体加载速度提升 2-3 倍
+- **批量 PDF 文字提取**：新增 `extract_pdf_texts` Rust 命令 + `applyPdfTextToResults` 前端函数，一次打开 PDF，rayon 并行提取多页文字；前端按 PDF 路径分组批量调用，失败时自动回退单页模式
+- **copy_file Rust 命令**：新增文件复制命令（`std::fs::copy`），用于缓存 PDF 复用到保存路径
+
+### ⚡ 优化
+
+- **预览加载速度大幅提升**（2-3x）：PDF 文件预览加载性能优化，包括降低预览 DPI（150 vs 300）和 JPEG 编码支持，渲染像素减少 75%，文件体积减少 60-80%
   - 预览 DPI：300 → 150（屏幕显示足够清晰）
   - 图像格式：PNG → JPEG（质量 80%，文件体积更小）
   - 移除预览时的强制 DPI 自适应缩放
-- **打印质量完全不受影响**：打印/保存使用独立的矢量流程（lopdf 直通），直接从原始 PDF 文件读取，不依赖预览渲染结果，打印质量和文件体积与优化前完全一致
+  - 打印质量完全不受影响：打印/保存走独立矢量流程（lopdf 直通）
+- **批量文件加载优化**：重构 `processFilesIncremental`，一次批量 IPC 调用 `open_invoice_files` + `Promise.all` 并行渲染 + `setInterval` 定时批量刷新 UI，Toast 防抖 100ms，大幅减少等待时间
+- **智能 PDF 缓存**：引入 `deepEqual` 深度对象比较 + `canUseCachedPdf` + `updatePdfCache`，只要有有效缓存就复用，替代旧的 dirty flag 方案
+- **保存 PDF 缓存复用**：`savePdf` 先在临时目录生成 PDF 作为缓存，再 `copy_file` 到用户路径；布局不变时直接复制缓存文件
+- **PDFium 打印自动降级**：PDFium 打印失败/异常时自动 fallback 到 `doSumatraPrint`，用户无感知兜底
+- **IPC 异步化**：`render_pdf_pages` / `render_pdf_pages_pdfium` / `extract_pdf_text` / `extract_pdf_texts` 改为 `async fn` + `spawn_blocking`，防止 IPC 消息泵饥饿导致 `ERR_CONNECTION_REFUSED`
+- **文字提取日志增强**：`extract_pdf_text_from_doc` 新增 `pdf_path` 参数，错误信息包含文件名
 
 ### ⚠️ 已知限制
 

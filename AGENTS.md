@@ -2,10 +2,10 @@
 
 ## 项目概览
 
-- **版本**: v1.10.4
+- **版本**: v1.10.5
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
-- **后端**: `src-tauri/src/{lib.rs, pdf_engine.rs, pdfium_print.rs}`
+- **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
 - **OFD 解析**: `src-tauri/ofd-engine/` — 独立 crate
 - **双版本**: 轻量版 / OCR版（含 PP-OCRv5）
 
@@ -23,6 +23,14 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **版本号数据源**: `package.json` 是唯一数据源
 - **编译缓存**: 只改 HTML/JS/CSS 不会触发重编译，需改 Rust 文件才会完整重编译
 - **CI/CD**: GitHub Actions，push tag `v*` 触发
+
+### IPC 异步化 (async + spawn_blocking)
+
+所有 CPU 密集型后端命令必须用 `async fn` + `spawn_blocking` 包装，防止 IPC 消息泵饥饿导致 `ERR_CONNECTION_REFUSED`。
+
+- `render_pdf_pages` / `render_pdf_pages_pdfium` / `extract_pdf_text` / `extract_pdf_texts` 均已异步化
+- `spawn_blocking` 将计算移到线程池，IPC 线程可继续处理消息
+- 非 `async fn` 的同步命令会阻塞 IPC 线程
 
 ---
 
@@ -47,6 +55,17 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - 前端 fallback 链: `_winrtPdfAvailable` 标志 → WinRT 失败自动切换 PDFium
 - PDFium 位图渲染: `pdfium_print::render_pdf_to_images()` — BGRA→RGBA 转换 + PNG 编码
 
+### 预览与打印 DPI 分离 (v1.10.5)
+
+预览和打印使用不同的 DPI 和图片格式，兼顾速度与质量：
+
+- **预览 DPI**: `PDF_PREVIEW_DPI = 150`（屏幕显示足够清晰，是打印 DPI 的一半）
+- **打印/保存 DPI**: `PDF_RENDER_DPI = 300`（高质量输出，不变）
+- **预览格式**: JPEG（quality 80%），文件体积比 PNG 小 60-80%
+- **打印格式**: PDF 直通管道输出矢量 PDF，不受预览分辨率影响
+- `RenderedPage.format` 字段：前端据此判断图片格式（`"png"` 或 `"jpeg"`）
+- **移除预览时的自适应 DPI 缩放**：自适应缩放仅用于打印质量输出
+
 ### 发票字段提取
 
 **路径优先级**: PDF文字层 > OFD XML > OCR
@@ -56,9 +75,15 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **中文大写兜底**: `parseChineseNumeral()` — 阿拉伯金额因字体/编码丢失时的 fallback
 - **OCR 跳过条件**: `_pdfTextExtracted && sellerName && amountTax > 0`
 
-### PDF 文字层提取 (v1.9.4+)
+### PDF 文字层提取 (v1.9.4+ / 批量 v1.10.5)
 
 Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResult()` 复用 `extractByCoordinates()`。
+
+**批量提取 (v1.10.5)**:
+- `extract_pdf_texts(pdf_path, page_indices)` — 一次打开 PDF，rayon 并行提取多页文字
+- 前端 `applyPdfTextToResults(results, pdfPath)` — 按 PDF 路径分组，多 PDF 文件独立批量调用
+- 批量失败时自动回退到单页 `extract_pdf_text()`
+- `extract_pdf_text_from_doc()` — 内部共享函数，单页/批量共用同一实现
 
 **关键坑**:
 - Form XObject 内嵌字体需展开（`/Subtype /Form`）
@@ -84,16 +109,103 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 - **DLL 位置**: `{exe}/tools/pdfium.dll`（与 SumatraPDF.exe 同目录）
 - **下载源**: `bblanchon/pdfium-binaries` via `gh-proxy.com` 加速
 
+### PDFium 打印 SEH 保护 (v1.10.3)
+
+部分打印机驱动的 GDI 实现有 bug，`FPDF_RenderPage` 直打 DC 时可能触发原生访问违例（ACCESS_VIOLATION），Rust 无法捕获导致直接闪退。
+
+- **SEH 包装器**：`seh_wrapper.c` C 文件，用 `__try/__except` 捕获原生崩溃
+- **矢量优先 + 位图 fallback**：始终先尝试矢量直打 DC（零质量损失），仅在 SEH 捕获异常时自动 fallback 到 `FPDF_RenderPageBitmap` + `StretchDIBits` 位图渲染
+- **编译**: `cc` build-dependency 将 C 文件编译为静态库链接
+
+### DEVMODE 完整缓冲区 (v1.10.3)
+
+`get_printer_default_devmode()` 必须保留驱动私有数据，否则 `CreateDCW` 访问违例。
+
+- 原先用 `std::ptr::read` 只复制 `sizeof(DEVMODEW)` 字节，丢弃 `dmDriverExtra` 字节
+- 现改为返回完整 `Vec<u8>` 缓冲区，保留全部驱动配置（纸盒选择、纸张来源等）
+
+### 打印流程解耦 (v1.10.4)
+
+各打印模式独立调用对应命令，不再经 `generate_pdf_from_layout` 隐式降级。
+
+- SumatraPDF / PDFium / PDF 阅读器模式直接调用各自的打印命令
+- 此前 SumatraPDF 模式重新生成时会 fallback 到 `shell_execute_print`，PDF 阅读器模式会经 SumatraPDF 路径 → 现已修正
+
+### 设置持久化 (v1.10.1)
+
+关闭软件后自动记住用户设置，下次打开自动恢复。
+
+- **统一入口**: `saveSettings()` / `loadSettings()` — `fapiao-settings` JSON 存储
+- **覆盖范围**: 排版布局、纸张、边距、缩放、旋转、份数、颜色、打印模式、辅助开关、水印、页脚、下边距
+- **防抖保存**: `updatePreview()` 500ms 防抖自动触发 `saveSettings()`
+- **恢复默认**: 清除所有持久化数据
+
+### 金额校验可视化 (v1.10.4)
+
+OCR 和 PDF 文字提取金额求和校验失败时可视化提示。
+
+- 发票卡片金额徽章显示 ⚠ 警告标识
+- hover 警告徽章可查看含税/不含税/税额/验证计算详情
+- 汇总栏新增校验异常发票计数提示
+
+### 排版份数批量设置 (v1.10.4)
+
+文件列表新增 ② 按钮，支持批量设置选中发票排版份数（×1/×2/×3）。
+
+- **区分概念**: 「排版份数」= 每张发票在版面中重复几次 / 「打印份数」= 整版打印几份
+- 模态框和设置面板分别标注，避免混淆
+
+### 预览加载优化 (v1.10.5)
+
+大幅提升 PDF 文件预览加载速度（2-3 倍）。
+
+- **预览 DPI**: 300 → 150，渲染像素减少 75%
+- **图片格式**: PNG → JPEG（quality 80%），文件体积减少 60-80%
+- **打印不受影响**: 打印/保存走独立矢量流程（lopdf 直通），直接从原始 PDF 读取
+- `render_pdf_pages` / `render_pdf_pages_pdfium` 新增 `use_jpeg` 参数
+- `RenderedPage` 新增 `format` 字段（`"png"` / `"jpeg"`）
+- `PDF_PREVIEW_DPI = 150` 常量独立于 `PDF_RENDER_DPI = 300`
+
+### 智能 PDF 缓存 (v1.10.5)
+
+用深度对象比较替代 dirty flag，精确判断缓存的 PDF 是否可复用。
+
+- `deepEqual(a, b)` — 递归深度比较，比较整个 `LayoutRenderRequest`
+- `canUseCachedPdf(currentRequest)` — 只要排版参数没变，任何打印模式/H5导出都复用
+- `updatePdfCache(request, pdfPath)` — 更新缓存引用
+- 替代了旧的 `_pdfDirty` / `_lastPdfPath` 简单标记方案
+- **保存 PDF 复用**: `savePdf` 先生成到临时目录作为缓存，再 `copy_file` 复制到用户路径，后续布局不变时直接复制缓存文件
+
+### PDFium 打印自动降级
+
+PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
+
+- `doPdfiumPrint` 中异常/失败时不再报错退出，自动调用 `doSumatraPrint(files, s)`
+- 用户无感知降级，打印始终有兜底
+
+### 批量文件加载优化 (v1.10.5)
+
+重构 `processFilesIncremental`，显著减少 IPC 往返次数和加载等待时间。
+
+- **一次批量 IPC**: `open_invoice_files({paths: paths})` 一次性读取所有文件，替代逐文件调用
+- **并行渲染**: `Promise.all` 并发渲染所有文件，增量替换骨架屏
+- **定时刷新 UI**: `setInterval` 按时间间隔批量更新 DOM，避免每个文件都触发重绘
+- **Toast 防抖**: toast 更新间隔从每文件变为 100ms 最低间隔
+
+### copy_file 命令 (v1.10.5)
+
+新增 Rust 端文件复制命令，用于缓存 PDF 复用到保存路径。
+
 ---
 
 ## 前端模块
 
 | 文件 | 职责 |
 |------|------|
-| `app.js` | 主入口、状态管理(S)、文件加载、Tauri IPC |
-| `ocr.js` | 发票字段提取、金额解析、中文大写解析 |
-| `layout.js` | 布局计算、预览渲染、单票调整拖拽 |
-| `print.js` | 打印/导出、构建 LayoutRenderRequest |
+| `app.js` | 主入口、状态管理(S)、文件加载（批量IPC+并行渲染）、Tauri IPC、设置持久化、批量文字提取分发 |
+| `ocr.js` | 发票字段提取、金额解析、中文大写解析、类型检测、金额校验 |
+| `layout.js` | 布局计算、预览渲染、单票调整拖拽、slot 交互 |
+| `print.js` | 打印/导出、构建 LayoutRenderRequest、智能 PDF 缓存（deepEqual）、四种打印模式分发、PDFium→SumatraPDF 自动降级 |
 
 - 全部用 `var` 声明顶层变量（避免与 Tauri 注入脚本冲突）
 - 无模块打包，`index.html` 按顺序 `<script>` 加载
@@ -112,6 +224,12 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 ### Tauri 2.x
 - `<input>.click()` 无效 → 用 `plugin:dialog|open`
 - `async fn` 后端命令必须用 `spawn_blocking` 包装
+- **同步命令阻塞 IPC 线程**：非 `async fn` 的命令在 Tauri 2.x 中会阻塞 IPC 消息泵，导致 `ERR_CONNECTION_REFUSED`。所有 CPU 密集型命令必须 `async fn` + `spawn_blocking`
+
+### 智能 PDF 缓存
+- `deepEqual` 比较整个 `LayoutRenderRequest` 对象，任何字段变化都触发重新生成
+- 保存 PDF 时先生成到临时目录 → `updatePdfCache(req, tempPath)` → `copy_file` 到用户路径
+- `copy_file` 是 Rust 端命令（`std::fs::copy`），避免 JS 端文件系统操作限制
 
 ### OFD
 - ImageMask 遮罩: 二值图合成主图 alpha 通道
@@ -128,6 +246,18 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 - `DEVMODEW` 嵌套匿名结构: `dm.Anonymous1.Anonymous1.dmCopies`，`dmDuplex` 是 `DEVMODE_DUPLEX(i16)`
 - `DOCINFOW`/`StartDocW`/`StartPage`/`EndPage` 在 `Win32::Storage::Xps` 模块（不是 Gdi）
 - `windows` crate 0.58: `HENHMETAFILE` 是 CopyType，`DeleteEnhMetaFile(h)` 不需要 `&`
+- **SEH 保护**: 打印机驱动 GDI bug 导致 `FPDF_RenderPage` 原生崩溃 → `seh_wrapper.c` 用 `__try/__except` 捕获，fallback 到位图渲染
+- **DEVMODE 截断**: `std::ptr::read` 只复制 `sizeof(DEVMODEW)` 丢弃驱动私有数据 → 返回完整 `Vec<u8>` 缓冲区
+
+### 预览与打印分离
+- 预览 DPI (150) 和打印 DPI (300) 独立管理，`PDF_PREVIEW_DPI` ≠ `PDF_RENDER_DPI`
+- 预览用 JPEG 编码减小传输体积，打印走矢量直通管道不受影响
+- `loadFileFromDataUrlFast()` 中 PDF 渲染调用必须传递 `useJpeg: true`, `dpi: PDF_PREVIEW_DPI`
+
+### 批量文字提取
+- 多 PDF 文件场景下必须按 `pdfPath` 分组调用 `extract_pdf_texts`，不能用跨 PDF 的 pageIdx 请求
+- `extract_pdf_texts` 返回 `HashMap<u32, PdfTextResult>` keyed by pageIdx，前端按 `r._pdfPageIdx` 取对应结果
+- 批量失败时自动回退单页 `extract_pdf_text`，再失败则回退 OCR
 
 ### EXIF
 - `image` crate 不自动应用 EXIF；6=90°CW, 8=90°CCW, 3=180°

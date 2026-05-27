@@ -1438,7 +1438,7 @@ pub struct PdfTextResult {
 pub fn extract_pdf_text(pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, String> {
     let doc = lopdf::Document::load(pdf_path)
         .map_err(|e| format!("PDF加载失败: {}", e))?;
-    extract_pdf_text_from_doc(&doc, page_idx)
+    extract_pdf_text_from_doc(&doc, pdf_path, page_idx)
 }
 
 /// Extract text from multiple pages in a single PDF document.
@@ -1454,7 +1454,7 @@ pub fn extract_pdf_texts(pdf_path: &str, page_indices: &[u32]) -> Result<std::co
     let results: Vec<(u32, Result<PdfTextResult, String>)> = page_indices
         .par_iter()
         .map(|&page_idx| {
-            let result = extract_pdf_text_from_doc(&doc, page_idx);
+            let result = extract_pdf_text_from_doc(&doc, pdf_path, page_idx);
             (page_idx, result)
         })
         .collect();
@@ -1469,7 +1469,7 @@ pub fn extract_pdf_texts(pdf_path: &str, page_indices: &[u32]) -> Result<std::co
 }
 
 /// Helper function to extract text from a single page of an already-loaded PDF document.
-fn extract_pdf_text_from_doc(doc: &lopdf::Document, page_idx: u32) -> Result<PdfTextResult, String> {
+fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u32) -> Result<PdfTextResult, String> {
     use lopdf::Object;
 
     let pages: std::collections::BTreeMap<u32, lopdf::ObjectId> = doc.get_pages();

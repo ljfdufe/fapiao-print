@@ -3,6 +3,47 @@
 // =====================================================
 // Dependencies (global): isTauri, invoke, S, getSettings, getActiveFiles, buildPages, showLoading, hideLoading, toast, getSaveDir, setSaveDir, escHtml, calculateLayout
 
+// 智能缓存：保存上一次的 LayoutRequest 和 PDF 路径
+var _lastLayoutRequest = null;
+var _lastPdfPath = null;
+
+/**
+ * 深度比较两个对象是否相等
+ */
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object' || a === null || b === null) return false;
+  
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  
+  if (keysA.length !== keysB.length) return false;
+  
+  for (const key of keysA) {
+    if (!keysB.includes(key)) return false;
+    if (!deepEqual(a[key], b[key])) return false;
+  }
+  
+  return true;
+}
+
+/**
+ * 检查是否可以使用缓存（比较当前和上次的 LayoutRequest）
+ */
+function canUseCachedPdf(currentRequest) {
+  if (!_lastLayoutRequest || !_lastPdfPath) return false;
+  return deepEqual(currentRequest, _lastLayoutRequest);
+}
+
+/**
+ * 更新缓存（生成 PDF 后调用）
+ */
+function updatePdfCache(request, pdfPath) {
+  _lastLayoutRequest = request;
+  _lastPdfPath = pdfPath;
+}
+
 /**
  * Build a LayoutRenderRequest for the new Rust backend.
  * Replaces the old approach of renderPageToCanvas + generate_and_print/save_pdf.
@@ -224,7 +265,8 @@ async function doSumatraPrint(files, s) {
     }
   }
 
-  if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
+  var currentRequest = buildLayoutRequest(files, s);
+  if (canUseCachedPdf(currentRequest) && isTauri && invoke) {
     try {
       showLoading('正在使用缓存PDF打印...');
       var result = await invoke('sumatrapdf_print', {
@@ -265,8 +307,7 @@ async function doSumatraPrint(files, s) {
       });
       if (unlisten) unlisten();
       if (result.success) {
-        _lastPdfPath = result.pdfPath;
-        _pdfDirty = false;
+        updatePdfCache(layoutReq, result.pdfPath);
         showLoading('正在通过SumatraPDF打印...');
         try {
           var printResult = await invoke('sumatrapdf_print', {
@@ -323,7 +364,8 @@ async function doPdfiumPrint(files, s) {
     }
   }
 
-  if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
+  var currentRequest = buildLayoutRequest(files, s);
+  if (canUseCachedPdf(currentRequest) && isTauri && invoke) {
     try {
       showLoading('正在使用缓存PDF打印（PDFium）...');
       var unlisten0 = await listenPdfProgress();
@@ -363,11 +405,12 @@ async function doPdfiumPrint(files, s) {
       if (unlisten) unlisten();
       hideLoading();
       if (result.success) {
-        _pdfDirty = false;
-        if (result.pdfPath) _lastPdfPath = result.pdfPath;
+        if (result.pdfPath) updatePdfCache(layoutReq, result.pdfPath);
         toast('\uD83D\uDCA8 ' + result.message);
       } else {
-        toast('打印失败：' + result.message);
+        console.warn('PDFium print failed, falling back to SumatraPDF:', result.message);
+        toast('PDFium打印失败，尝试使用 SumatraPDF...');
+        await doSumatraPrint(files, s);
       }
     } else {
       if (unlisten) unlisten();
@@ -378,12 +421,15 @@ async function doPdfiumPrint(files, s) {
     if (unlisten) unlisten();
     hideLoading();
     console.error('PDFium vector print error:', err);
-    toast('打印出错：' + String(err));
+    console.warn('PDFium print failed, falling back to SumatraPDF');
+    toast('PDFium打印失败，尝试使用 SumatraPDF...');
+    await doSumatraPrint(files, s);
   }
 }
 
 async function doPdfReaderPrint(files, s) {
-  if (!_pdfDirty && _lastPdfPath && isTauri && invoke) {
+  var currentRequest = buildLayoutRequest(files, s);
+  if (canUseCachedPdf(currentRequest) && isTauri && invoke) {
     try {
       showLoading('正在使用缓存PDF打印...');
       var cacheResult = await invoke('print_pdf_file', {
@@ -420,8 +466,7 @@ async function doPdfReaderPrint(files, s) {
       });
       if (unlisten) unlisten();
       if (result.success) {
-        _lastPdfPath = result.pdfPath;
-        _pdfDirty = false;
+        updatePdfCache(layoutReq, result.pdfPath);
         showLoading('正在通过PDF阅读器打印...');
         try {
           var printResult = await invoke('print_pdf_file', {
@@ -488,17 +533,45 @@ async function savePdf() {
     } catch(e) { savePath = null; }
   }
 
+  var s = getSettings();
+  var currentRequest = buildLayoutRequest(files, s);
+  // 检查是否可以利用缓存
+  if (canUseCachedPdf(currentRequest) && isTauri && invoke) {
+    try {
+      showLoading('正在复制缓存PDF...');
+      // 直接复制缓存的 PDF 文件到目标位置
+      var copyResult = await invoke('copy_file', {
+        srcPath: _lastPdfPath,
+        destPath: savePath
+      });
+      hideLoading();
+      if (copyResult && copyResult.success) {
+        toast('\u2705 PDF已保存（利用缓存）: ' + savePath);
+        // Auto-open using ShellExecute (more reliable than open_url + file:///)
+        if (S.feat.autoOpenPdf && savePath) {
+          try { invoke('open_file', { path: savePath }); } catch(e) {}
+        }
+        return;
+      }
+    } catch(e) {
+      hideLoading();
+      console.warn('Cached PDF copy failed, regenerating:', e);
+    }
+  }
+
   showLoading('正在准备保存...');
   var unlisten = await listenPdfProgress();
   try {
-    var s = getSettings();
     var layoutReq = buildLayoutRequest(files, s);
 
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF...';
+      // 先在临时目录生成，作为缓存
+      var tempDir = await invoke('get_temp_dir');
+      var tempPath = tempDir + '\\fapiao_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
-        outputPath: savePath,
+        outputPath: tempPath,
         directPrint: false,
         printerName: null,
         printAfter: false
@@ -506,12 +579,19 @@ async function savePdf() {
       if (unlisten) unlisten();
       hideLoading();
       if (result.success) {
-        _lastPdfPath = result.pdfPath;
-        _pdfDirty = false;
-        toast('\u2705 PDF已保存: ' + result.pdfPath);
+        // 更新缓存（使用临时路径，不是用户保存路径）
+        updatePdfCache(layoutReq, tempPath);
+        
+        // 复制到用户保存路径
+        await invoke('copy_file', {
+          srcPath: tempPath,
+          destPath: savePath
+        });
+        
+        toast('\u2705 PDF已保存: ' + savePath);
         // Auto-open using ShellExecute (more reliable than open_url + file:///)
-        if (S.feat.autoOpenPdf && result.pdfPath) {
-          try { invoke('open_file', { path: result.pdfPath }); } catch(e) {}
+        if (S.feat.autoOpenPdf && savePath) {
+          try { invoke('open_file', { path: savePath }); } catch(e) {}
         }
       } else {
         toast('PDF生成失败：' + result.message);

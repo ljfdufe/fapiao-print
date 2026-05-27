@@ -1,6 +1,6 @@
 // =====================================================
 // 发票批量打印工具 — 主入口
-// v1.8.2 — 进程退出修复 + CropBox优先 + 加载进度优化
+// v1.10.5 — 预览加速 + 批量加载 + 智能缓存 + IPC 异步化
 // =====================================================
 
 // Detect Tauri — use var to avoid conflict with Tauri's injected scripts
@@ -504,12 +504,23 @@ async function processFileDataList(fileDataList) {
     });
   });
 
+  var startTime = Date.now();
+  var updateIntervalMs = Math.max(50, Math.min(150, Math.floor(500 / total)));
+  var hasNewResults = false;
+
+  var updateInterval = setInterval(function() {
+    if (hasNewResults) {
+      renderFileList(); updatePreview(); updatePrintBtn();
+      hasNewResults = false;
+    }
+  }, updateIntervalMs);
+
+  var lastToastUpdate = 0;
   for (var fdIdx = 0; fdIdx < fileDataList.length; fdIdx++) {
-    var fd = fileDataList[fdIdx];
     var r = await loadPromises[fdIdx];
     completed++;
 
-    // Find placeholder by key
+    var fd = fileDataList[fdIdx];
     var phIdx = -1;
     for (var i = 0; i < S.files.length; i++) {
       if (S.files[i]._placeholderKey === fd._phKey) { phIdx = i; break; }
@@ -521,46 +532,51 @@ async function processFileDataList(fileDataList) {
       S.files.splice.apply(S.files, [phIdx, 1].concat(items));
       added += items.length;
     } else if (phIdx >= 0) {
-      // Remove placeholder for failed/empty file
       S.files.splice(phIdx, 1);
     }
 
-    // Update loading progress toast
-    var ocrRemaining = _ocrQueue.length + _ocrRunning;
-    var isLast = (completed >= total);
-    if (isLast) {
-      // Last file loaded — check if OCR still running
-      if (ocrRemaining > 0 && S.feat.ocrEnabled) {
-        var ocrDone2 = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
-        toastLoading('加载完成，识别中 ' + ocrDone2 + '/' + _ocrBatchTotal);
-      }
-      // else: will be handled after the loop (toastDone)
-    } else {
-      if (ocrRemaining > 0 && S.feat.ocrEnabled) {
-        var ocrDone = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
-        toastLoading('加载中 ' + completed + '/' + total + '，识别中 ' + ocrDone + '/' + _ocrBatchTotal);
+    var now = Date.now();
+    if (now - lastToastUpdate > 100 || completed >= total) {
+      lastToastUpdate = now;
+      var ocrRemaining = _ocrQueue.length + _ocrRunning;
+      var isLast = (completed >= total);
+      if (isLast) {
+        if (ocrRemaining > 0 && S.feat.ocrEnabled) {
+          var ocrDone2 = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
+          toastLoading('加载完成，识别中 ' + ocrDone2 + '/' + _ocrBatchTotal);
+        }
       } else {
-        toastLoading('加载中 ' + completed + '/' + total);
+        if (ocrRemaining > 0 && S.feat.ocrEnabled) {
+          var ocrDone = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
+          toastLoading('加载中 ' + completed + '/' + total + '，识别中 ' + ocrDone + '/' + _ocrBatchTotal);
+        } else {
+          toastLoading('加载中 ' + completed + '/' + total);
+        }
       }
     }
 
-    renderFileList(); updatePreview(); updatePrintBtn();
-
-    // Yield to browser for painting — ensures user sees each file appear incrementally
+    hasNewResults = true;
     await nextFrame();
   }
 
-  // Loading batch complete
+  clearInterval(updateInterval);
+  renderFileList(); updatePreview(); updatePrintBtn();
+
   _loadingBatchActive = false;
 
-  // If no OCR queued, dismiss toast now
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
     _ocrBatchTotal = 0;
     _ocrBatchAddedCount = 0;
-    toastDone(added > 0 ? '已加载 ' + added + ' 张发票' : '文件加载失败');
+    var elapsed = Date.now() - startTime;
+    var minToastDelay = Math.max(300, 800 - elapsed);
+    if (added > 0) {
+      var doneMsg = '已加载 ' + added + ' 张发票';
+      setTimeout(function() { toast(doneMsg, 2500); }, minToastDelay);
+    } else {
+      toast('文件加载失败');
+    }
   } else {
-    // OCR still running — save added count for _drainOcrQueue's final toast
     _ocrBatchAddedCount = added;
   }
 }
@@ -668,11 +684,10 @@ async function processFilesIncremental(paths) {
   var total = paths.length;
   var completed = 0;
   var added = 0;
-  var BATCH_RENDER_INTERVAL = 1; // Render every N files — 1 = each file, stable skeleton keeps layout from jumping
-  var _dirty = false;
+  var startTime = Date.now();
   _loadingBatchActive = true;
 
-  // 1. Create ALL skeleton placeholders immediately — stable layout from the start
+  // 1. Create ALL skeleton placeholders immediately
   var placeholders = [];
   paths.forEach(function(p) {
     var nameParts = p.split(/[/\\]/);
@@ -685,71 +700,68 @@ async function processFilesIncremental(paths) {
   });
   renderFileList(); updatePreview(); updatePrintBtn();
 
-  // 2. Block interaction + show persistent spinner toast
   document.getElementById('fileList').classList.add('batch-loading');
   toastLoading('加载中 0/' + total);
 
-  // Count how many files will need OCR (for batch tracking)
-  if (S.feat.ocrEnabled) {
-    _ocrBatchTotal = total;
+  if (S.feat.ocrEnabled) { _ocrBatchTotal = total; }
+
+  // 2. Batch read all files in one IPC call
+  var fileDataMap = {};
+  try {
+    var allFileData = await invoke('open_invoice_files', { paths: paths });
+    if (allFileData && allFileData.length > 0) {
+      for (var ai = 0; ai < allFileData.length; ai++) {
+        fileDataMap[allFileData[ai].path || ''] = allFileData[ai];
+      }
+    }
+  } catch (err) {
+    console.error('Batch read error:', err);
   }
 
-  // 3. Load files one by one, replace placeholders in-place, batch-render periodically
-  for (var pi = 0; pi < paths.length; pi++) {
-    if (window.__TAURI_CLOSING__) break;
+  // 3. Start all renders in parallel, then process results incrementally
+  var loadPromises = placeholders.map(function(ph, pi) {
     var path = paths[pi];
-    var ph = placeholders[pi];
-    try {
-      var fileDataList = await invoke('open_invoice_files', { paths: [path] });
-      if (!fileDataList || fileDataList.length === 0) {
-        // Remove placeholder for failed file
-        var failIdx = S.files.indexOf(ph);
-        if (failIdx >= 0) S.files.splice(failIdx, 1);
-        completed++;
-        continue;
-      }
+    var fd = fileDataMap[path];
+    if (!fd) return Promise.resolve(null);
+    return loadFileFromDataUrlFast(fd).catch(function(err) {
+      console.error('Load error:', fd.name, err);
+      return null;
+    });
+  });
 
-      // Load each file data (render image, queue OCR)
-      for (var fi = 0; fi < fileDataList.length; fi++) {
-        var fd = fileDataList[fi];
-        var r = await loadFileFromDataUrlFast(fd).catch(function(err) {
-          console.error('Load file error:', fd.name, err);
-          return null;
-        });
+  // 处理任意完成的 Promise，而不是按顺序
+  var remaining = placeholders.slice();
+  var promises = loadPromises.slice();
+  var completedCount = 0;
 
-        // Replace this placeholder (or the first remaining one from this path)
-        var phIdx = -1;
-        if (fi === 0) {
-          phIdx = S.files.indexOf(ph);
-        }
-        if (phIdx < 0) {
-          // Fallback: find any remaining placeholder from this batch
-          for (var si = 0; si < S.files.length; si++) {
-            if (S.files[si]._loading && placeholders.indexOf(S.files[si]) >= 0) { phIdx = si; break; }
-          }
-        }
+  while (remaining.length > 0) {
+    // 等待任意一个完成
+    var winner = await Promise.race(
+      promises.map(function(p, i) {
+        return p
+          .then(function(r) { return { result: r, idx: i, success: true }; })
+          .catch(function() { return { idx: i, success: false }; });
+      })
+    );
 
-        if (phIdx >= 0 && r) {
-          var items = Array.isArray(r) ? r : [r];
-          items.forEach(function(it) { _newFileIds[it.id] = true; });
-          S.files.splice.apply(S.files, [phIdx, 1].concat(items));
-          added += items.length;
-        } else if (phIdx >= 0) {
-          S.files.splice(phIdx, 1);
-        }
-        _dirty = true;
-      }
-    } catch (err) {
-      console.error('Read file error:', path, err);
-      var errIdx = S.files.indexOf(ph);
-      if (errIdx >= 0) S.files.splice(errIdx, 1);
+    // 找到对应的索引并处理
+    var ph = remaining[winner.idx];
+    var phIdx = S.files.indexOf(ph);
+    remaining.splice(winner.idx, 1);
+    promises.splice(winner.idx, 1);
+    completedCount++;
+
+    if (phIdx >= 0 && winner.success && winner.result) {
+      var items = Array.isArray(winner.result) ? winner.result : [winner.result];
+      items.forEach(function(it) { _newFileIds[it.id] = true; });
+      S.files.splice.apply(S.files, [phIdx, 1].concat(items));
+      added += items.length;
+    } else if (phIdx >= 0) {
+      S.files.splice(phIdx, 1);
     }
 
-    completed++;
-
-    // Update progress toast (always, so user sees progress)
     var ocrRemaining = _ocrQueue.length + _ocrRunning;
-    var isLast = (completed >= total);
+    var isLast = (completedCount >= total);
     if (isLast) {
       if (ocrRemaining > 0 && S.feat.ocrEnabled) {
         var ocrDone2 = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
@@ -758,26 +770,17 @@ async function processFilesIncremental(paths) {
     } else {
       if (ocrRemaining > 0 && S.feat.ocrEnabled) {
         var ocrDone = _ocrBatchTotal > 0 ? _ocrBatchTotal - ocrRemaining : 0;
-        toastLoading('加载中 ' + completed + '/' + total + '，识别中 ' + ocrDone + '/' + _ocrBatchTotal);
+        toastLoading('加载中 ' + completedCount + '/' + total + '，识别中 ' + ocrDone + '/' + _ocrBatchTotal);
       } else {
-        toastLoading('加载中 ' + completed + '/' + total);
+        toastLoading('加载中 ' + completedCount + '/' + total);
       }
     }
 
-    // Batch render: every BATCH_RENDER_INTERVAL files or at the end
-    if (_dirty && (completed % BATCH_RENDER_INTERVAL === 0 || isLast)) {
-      renderFileList(); updatePreview(); updatePrintBtn();
-      _dirty = false;
-      await nextFrame();
-    }
-  }
-
-  // Final render if any remaining dirty
-  if (_dirty) {
+    _pdfDirty = true;
     renderFileList(); updatePreview(); updatePrintBtn();
+    await nextFrame();
   }
 
-  // Loading batch complete
   _loadingBatchActive = false;
   document.getElementById('fileList').classList.remove('batch-loading');
 
@@ -785,7 +788,14 @@ async function processFilesIncremental(paths) {
     _ocrToastActive = false;
     _ocrBatchTotal = 0;
     _ocrBatchAddedCount = 0;
-    toastDone(added > 0 ? '已加载 ' + added + ' 张发票' : '文件加载失败');
+    var elapsed = Date.now() - startTime;
+    var minToastDelay = Math.max(300, 800 - elapsed);
+    if (added > 0) {
+      var doneMsg = '已加载 ' + added + ' 张发票';
+      setTimeout(function() { toast(doneMsg, 2500); }, minToastDelay);
+    } else {
+      toast('文件加载失败');
+    }
   } else {
     _ocrBatchAddedCount = added;
   }
@@ -1055,6 +1065,74 @@ function svgToPngDataUrl(svgString, pageWidthMm, pageHeightMm) {
  * Fast load from FileData — show preview immediately, OCR in background.
  * @param {Object} fd - FileData from Rust: { name, dataUrl, size, ext, path, origW, origH }
  */
+function applyPdfTextToResults(results, pdfPath) {
+  if (!results || results.length === 0) return;
+  if (!S.feat.pdfTextEnabled) return;
+  var pageIndices = results.map(function(r) { return r._pdfPageIdx; });
+  invoke('extract_pdf_texts', {
+    pdfPath: pdfPath,
+    pageIndices: pageIndices
+  }).then(function(pdfTextMap) {
+    results.forEach(function(r) {
+      var pdfText = pdfTextMap[r._pdfPageIdx];
+      if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+        applyPdfTextResult(r, pdfText);
+        updateFileItem(r);
+        updateAmountSummary();
+      } else if (hasOcr && S.feat.ocrEnabled) {
+        console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
+        applyOcrAsync(r, r.previewUrl);
+      }
+    });
+  }).catch(function(err) {
+    console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
+    results.forEach(function(r) {
+      invoke('extract_pdf_text', {
+        pdfPath: r._pdfPath,
+        pageIdx: r._pdfPageIdx
+      }).then(function(pdfText) {
+        if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
+          applyPdfTextResult(r, pdfText);
+          updateFileItem(r);
+          updateAmountSummary();
+        } else if (hasOcr && S.feat.ocrEnabled) {
+          applyOcrAsync(r, r.previewUrl);
+        }
+      }).catch(function() {
+        if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
+      });
+    });
+  });
+}
+
+function buildPdfResults(pages, id, name, size, filePath) {
+  var results = [];
+  for (var p = 0; p < pages.length; p++) {
+    var pg = pages[p];
+    var fileObj = createFileObj({
+      id: id + '_p' + (p + 1),
+      name: pages.length > 1 ? name.replace(/\.pdf$/i, '') + '_第' + (p + 1) + '页.pdf' : name,
+      size: size, type: 'pdf', previewUrl: pg.imageDataUrl,
+      ow: pg.width || 0, oh: pg.height || 0,
+      renderDpi: pg.renderDpi || PDF_RENDER_DPI,
+      pdfPath: filePath, pdfPageIdx: p
+    });
+    results.push(fileObj);
+  }
+  return results;
+}
+
+function loadPdfImages(results) {
+  return Promise.all(results.map(function(r) {
+    return new Promise(function(resolve) {
+      var img = new Image();
+      img.src = r.previewUrl;
+      img.onload = function() { r.img = img; resolve(r); };
+      img.onerror = function() { resolve(r); };
+    });
+  }));
+}
+
 function loadFileFromDataUrlFast(fd) {
   var name = fd.name, dataUrl = fd.dataUrl, size = fd.size, ext = fd.ext, filePath = fd.path;
   return new Promise(function(resolve) {
@@ -1066,76 +1144,12 @@ function loadFileFromDataUrlFast(fd) {
         var renderLabel = _winrtPdfAvailable ? 'WinRT' : 'PDFium';
         invoke(renderFn, { pdfPath: filePath, dpi: PDF_PREVIEW_DPI, useJpeg: true }).then(async function(pages) {
           if (pages && pages.length > 0) {
-            var results = [];
-            for (var p = 0; p < pages.length; p++) {
-              var pg = pages[p];
-              var img = new Image(); img.src = pg.imageDataUrl;
-              await new Promise(function(r) { img.onload = r; });
-              var fileObj = createFileObj({
-                id: id + '_p' + (p + 1),
-                name: pages.length > 1 ? name.replace(/\.pdf$/i, '') + '_第' + (p + 1) + '页.pdf' : name,
-                size: size, type: 'pdf', previewUrl: pg.imageDataUrl,
-                img: img, renderDpi: pg.renderDpi || PDF_RENDER_DPI,
-                pdfPath: filePath, pdfPageIdx: p
-              });
-              results.push(fileObj);
-            }
+            var results = buildPdfResults(pages, id, name, size, filePath);
             resolve(results.length === 1 ? results[0] : results);
-            // PDF 文字层提取（默认关闭以提高加载速度）
-            if (S.feat.pdfTextEnabled) {
-              if (results.length > 0) {
-                // Group results by PDF path (handle multiple different PDFs at once)
-                var resultsByPdfPath = {};
-                results.forEach(function(r) {
-                  var path = r._pdfPath;
-                  if (!resultsByPdfPath[path]) resultsByPdfPath[path] = [];
-                  resultsByPdfPath[path].push(r);
-                });
-                
-                // Process each PDF file in parallel
-                Object.keys(resultsByPdfPath).forEach(function(pdfPath) {
-                  var pdfResults = resultsByPdfPath[pdfPath];
-                  var pageIndices = pdfResults.map(function(r) { return r._pdfPageIdx; });
-                  
-                  invoke('extract_pdf_texts', {
-                    pdfPath: pdfPath,
-                    pageIndices: pageIndices
-                  }).then(function(pdfTextMap) {
-                    pdfResults.forEach(function(r) {
-                      var pdfText = pdfTextMap[r._pdfPageIdx];
-                      if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                        applyPdfTextResult(r, pdfText);
-                        updateFileItem(r);
-                        updateAmountSummary();
-                      } else if (hasOcr && S.feat.ocrEnabled) {
-                        console.log('[PDF文字提取] 文本层为空(无CMap/扫描件)，自动回退OCR');
-                        applyOcrAsync(r, r.previewUrl);
-                      }
-                    });
-                  }).catch(function(err) {
-                    console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
-                    // Fallback to individual extraction
-                    pdfResults.forEach(function(r) {
-                      invoke('extract_pdf_text', {
-                        pdfPath: r._pdfPath,
-                        pageIdx: r._pdfPageIdx
-                      }).then(function(pdfText) {
-                        if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                          applyPdfTextResult(r, pdfText);
-                          updateFileItem(r);
-                          updateAmountSummary();
-                        } else if (hasOcr && S.feat.ocrEnabled) {
-                          applyOcrAsync(r, r.previewUrl);
-                        }
-                      }).catch(function(e) {
-                        if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
-                      });
-                    });
-                  });
-                });
-              }
-            }
-            // OCR 队列（独立于 PDF 文字提取，由 ocrEnabled 控制）
+
+            loadPdfImages(results);
+            applyPdfTextToResults(results, filePath);
+
             results.forEach(function(r) {
               if (S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
             });
@@ -1150,72 +1164,12 @@ function loadFileFromDataUrlFast(fd) {
             console.warn('[PDF] WinRT failed, trying PDFium fallback...');
             invoke('render_pdf_pages_pdfium', { pdfPath: filePath, dpi: PDF_PREVIEW_DPI, useJpeg: true }).then(async function(pages2) {
               if (pages2 && pages2.length > 0) {
-                var results2 = [];
-                for (var p2 = 0; p2 < pages2.length; p2++) {
-                  var pg2 = pages2[p2];
-                  var img2 = new Image(); img2.src = pg2.imageDataUrl;
-                  await new Promise(function(r) { img2.onload = r; });
-                  var fileObj2 = createFileObj({
-                    id: id + '_p' + (p2 + 1),
-                    name: pages2.length > 1 ? name.replace(/\.pdf$/i, '') + '_第' + (p2 + 1) + '页.pdf' : name,
-                    size: size, type: 'pdf', previewUrl: pg2.imageDataUrl,
-                    img: img2, renderDpi: pg2.renderDpi || PDF_RENDER_DPI,
-                    pdfPath: filePath, pdfPageIdx: p2
-                  });
-                  results2.push(fileObj2);
-                }
+                var results2 = buildPdfResults(pages2, id, name, size, filePath);
                 resolve(results2.length === 1 ? results2[0] : results2);
-                if (S.feat.pdfTextEnabled) {
-                  if (results2.length > 0) {
-                    // Group results by PDF path (handle multiple different PDFs at once)
-                    var resultsByPdfPath2 = {};
-                    results2.forEach(function(r) {
-                      var path = r._pdfPath;
-                      if (!resultsByPdfPath2[path]) resultsByPdfPath2[path] = [];
-                      resultsByPdfPath2[path].push(r);
-                    });
-                    
-                    // Process each PDF file in parallel
-                    Object.keys(resultsByPdfPath2).forEach(function(pdfPath2) {
-                      var pdfResults2 = resultsByPdfPath2[pdfPath2];
-                      var pageIndices2 = pdfResults2.map(function(r) { return r._pdfPageIdx; });
-                      
-                      invoke('extract_pdf_texts', {
-                        pdfPath: pdfPath2,
-                        pageIndices: pageIndices2
-                      }).then(function(pdfTextMap2) {
-                        pdfResults2.forEach(function(r) {
-                          var pdfText2 = pdfTextMap2[r._pdfPageIdx];
-                          if (pdfText2 && pdfText2.lines && pdfText2.lines.length > 0) {
-                            applyPdfTextResult(r, pdfText2);
-                            updateFileItem(r);
-                            updateAmountSummary();
-                          } else if (hasOcr && S.feat.ocrEnabled) {
-                            applyOcrAsync(r, r.previewUrl);
-                          }
-                        });
-                      }).catch(function(err) {
-                        console.warn('[PDF文字提取] 批量提取失败，回退单页模式:', err);
-                        // Fallback
-                        pdfResults2.forEach(function(r) {
-                          invoke('extract_pdf_text', {
-                            pdfPath: r._pdfPath, pageIdx: r._pdfPageIdx
-                          }).then(function(pdfText) {
-                            if (pdfText && pdfText.lines && pdfText.lines.length > 0) {
-                              applyPdfTextResult(r, pdfText);
-                              updateFileItem(r);
-                              updateAmountSummary();
-                            } else if (hasOcr && S.feat.ocrEnabled) {
-                              applyOcrAsync(r, r.previewUrl);
-                            }
-                          }).catch(function() {
-                            if (hasOcr && S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
-                          });
-                        });
-                      });
-                    });
-                  }
-                }
+
+                loadPdfImages(results2);
+                applyPdfTextToResults(results2, filePath);
+
                 results2.forEach(function(r) {
                   if (S.feat.ocrEnabled) applyOcrAsync(r, r.previewUrl);
                 });
@@ -1458,12 +1412,12 @@ function setAllCopies(e, n) {
   renderFileList();
   updatePreview();
 }
-function togCheck(i) { S.files[i].checked = !S.files[i].checked; renderFileList(); updatePreview(); }
-function selectAll() { S.files.forEach(function(f) { f.checked = true; }); renderFileList(); updatePreview(); }
-function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); renderFileList(); updatePreview(); }
-function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); renderFileList(); updatePreview(); updatePrintBtn(); }
-function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; renderFileList(); updatePreview(); updatePrintBtn(); }
-function rotFile(i) { S.files[i].rotation = (S.files[i].rotation + 90) % 360; renderFileList(); updatePreview(); }
+function togCheck(i) { S.files[i].checked = !S.files[i].checked; _pdfDirty = true; renderFileList(); updatePreview(); }
+function selectAll() { S.files.forEach(function(f) { f.checked = true; }); _pdfDirty = true; renderFileList(); updatePreview(); }
+function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); _pdfDirty = true; renderFileList(); updatePreview(); }
+function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
+function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
+function rotFile(i) { S.files[i].rotation = (S.files[i].rotation + 90) % 360; _pdfDirty = true; renderFileList(); updatePreview(); }
 function ocrFile(i) {
   var f = S.files[i];
   if (f._loading || f._ocrPending) return;
@@ -1489,7 +1443,7 @@ function ocrAll() {
   toastLoading('识别中，共 ' + targets.length + ' 张...');
   targets.forEach(function(f) { applyOcrAsync(f, f.previewUrl); });
 }
-function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; renderFileList(); updatePreview(); updatePrintBtn(); }
+function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; _pdfDirty = true; renderFileList(); updatePreview(); updatePrintBtn(); }
 
 // Click file item → navigate preview to the page containing this invoice
 function clickFileItem(idx, event) {
@@ -2013,7 +1967,6 @@ function buildPages(files, settings) {
 // =====================================================
 var _saveTimer = null;
 function updatePreview() {
-  _pdfDirty = true;
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(saveSettings, 500);
   var files = getActiveFiles();

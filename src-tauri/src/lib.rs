@@ -132,21 +132,29 @@ fn get_printers() -> Result<Vec<PrinterInfo>, String> {
 /// Render PDF pages to images using Windows native API
 /// - `use_jpeg`: if true, encode as JPEG for faster loading (default: true for preview)
 #[command]
-fn render_pdf_pages(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
+async fn render_pdf_pages(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::render_pdf_pages(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI), use_jpeg.unwrap_or(true))
+    let d = dpi.unwrap_or(pdf_engine::RENDER_DPI);
+    let j = use_jpeg.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::render_pdf_pages(&pdf_path, d, j)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[command]
-fn render_pdf_pages_pdfium(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
+async fn render_pdf_pages_pdfium(pdf_path: String, dpi: Option<u32>, use_jpeg: Option<bool>) -> Result<Vec<RenderedPage>, String> {
     use std::sync::atomic::Ordering;
     if pdf_engine::SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Err("应用正在关闭".to_string());
     }
-    pdf_engine::render_pdf_pages_pdfium(&pdf_path, dpi.unwrap_or(pdf_engine::RENDER_DPI), use_jpeg.unwrap_or(true))
+    let d = dpi.unwrap_or(pdf_engine::RENDER_DPI);
+    let j = use_jpeg.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::render_pdf_pages_pdfium(&pdf_path, d, j)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[command]
@@ -174,6 +182,18 @@ fn open_file(path: String) -> Result<(), String> {
         shell_execute("open", &path)?;
     }
     Ok(())
+}
+
+/// Copy a file from srcPath to destPath
+#[command]
+fn copy_file(src_path: String, dest_path: String) -> Result<serde_json::Value, String> {
+    std::fs::copy(&src_path, &dest_path)
+        .map_err(|e| format!("Failed to copy file: {}", e))?;
+    Ok(serde_json::json!({
+        "success": true,
+        "srcPath": src_path,
+        "destPath": dest_path
+    }))
 }
 
 /// Open a URL in the default browser
@@ -1153,6 +1173,7 @@ pub fn run() {
         render_and_ocr_pdf,
         open_url,
         open_file,
+        copy_file,
         ocr_image,
         ocr_pdf_page,
         check_ocr_available,
@@ -1186,6 +1207,7 @@ pub fn run() {
         check_winrt_pdf,
         open_url,
         open_file,
+        copy_file,
         check_ocr_available,
         extract_pdf_text,
         extract_pdf_texts,
