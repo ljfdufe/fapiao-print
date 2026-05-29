@@ -1814,9 +1814,15 @@ function setSlotAlignment(alignH, alignV) {
     containedH_mm = (imgObjH * fitScale) / MM2PX;
   }
 
-  // Half-gap between slot edge and wrapper edge when centered
-  var gapX = (slotW_mm - containedW_mm) / 2;
-  var gapY = (slotH_mm - containedH_mm) / 2;
+  // Effective visual size = contained wrapper size × per-slot scale × custom scale.
+  // CSS scale() transforms from center; the wrapper box stays at containedW_mm×containedH_mm
+  // but the visible content is containedW_mm × effectiveScale.
+  // Alignment must account for the actual visual footprint.
+  var perScale = f.slotScale || 1;
+  var customScale = (settings.fitMode === 'custom') ? (settings.customScale || 1) : 1;
+  var effectiveScale = perScale * customScale;
+  var gapX = (slotW_mm - containedW_mm * effectiveScale) / 2;
+  var gapY = (slotH_mm - containedH_mm * effectiveScale) / 2;
 
   // Offset to move wrapper from centered position to target alignment
   var offsetX = 0, offsetY = 0;
