@@ -305,7 +305,7 @@ function onSlotMouseDown(e) {
   _slotDrag = {
     mode: 'move',
     slotEl: slotEl,
-    imgEl: slotEl.querySelector('img'),
+    wrapperEl: slotEl.querySelector(':scope > div'),
     fileObj: f,
     idx: idx,
     startX: e.clientX,
@@ -340,7 +340,7 @@ function startResize(e, idx, slotEl, corner) {
     mode: 'resize',
     corner: corner,
     slotEl: slotEl,
-    imgEl: slotEl.querySelector('img'),
+    wrapperEl: slotEl.querySelector(':scope > div'),
     fileObj: f,
     idx: idx,
     startX: e.clientX,
@@ -385,10 +385,10 @@ function onSlotMouseMove(e) {
     _slotDrag.fileObj.slotOffsetX = Math.round(newOffX * 10) / 10;
     _slotDrag.fileObj.slotOffsetY = Math.round(newOffY * 10) / 10;
 
-    // Real-time visual feedback: update CSS transform directly
-    if (_slotDrag.imgEl) {
+    // Real-time visual feedback: update CSS transform directly on wrapper div
+    if (_slotDrag.wrapperEl) {
       var transforms = buildTransformString(_slotDrag.fileObj, settings, layout.slots[_slotDrag.idx]);
-      _slotDrag.imgEl.style.transform = transforms;
+      _slotDrag.wrapperEl.style.transform = transforms;
     }
   } else if (_slotDrag.mode === 'resize') {
     var slotRect = _slotDrag.slotEl.getBoundingClientRect();
@@ -400,9 +400,9 @@ function onSlotMouseMove(e) {
     _slotDrag.fileObj.slotScale = Math.round(newScale * 100) / 100;
 
     // Real-time visual feedback
-    if (_slotDrag.imgEl) {
+    if (_slotDrag.wrapperEl) {
       var transforms = buildTransformString(_slotDrag.fileObj, settings, layout.slots[_slotDrag.idx]);
-      _slotDrag.imgEl.style.transform = transforms;
+      _slotDrag.wrapperEl.style.transform = transforms;
     }
   }
 }

@@ -106,6 +106,40 @@ function toastDone(msg) { toast(msg, 2500); }
 function hideToast() { var e = document.getElementById('toast'); e.classList.remove('show'); clearTimeout(toastT); }
 function syncSlider(s, n) { document.getElementById(n).value = s.value; }
 function syncRange(n, s) { document.getElementById(s).value = n.value; }
+
+/**
+ * Enable mouse wheel to increment/decrement number inputs and range sliders.
+ * Delegated to the sidebar; covers all settings panel inputs and adj panel inputs.
+ */
+function setupInputWheelSupport() {
+  var sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  sidebar.addEventListener('wheel', function(e) {
+    var t = e.target;
+    if (t.tagName !== 'INPUT') return;
+    if (t.type !== 'number' && t.type !== 'range') return;
+    e.preventDefault();
+
+    var step = parseFloat(t.step) || 1;
+    if (t.type === 'range') step = parseFloat(t.step) || 1;
+    var min = t.hasAttribute('min') ? parseFloat(t.min) : -Infinity;
+    var max = t.hasAttribute('max') ? parseFloat(t.max) : Infinity;
+    var val = parseFloat(t.value);
+    if (isNaN(val)) val = 0;
+
+    if (e.deltaY < 0) val += step;
+    else if (e.deltaY > 0) val -= step;
+
+    val = Math.max(min, Math.min(max, val));
+    // Round to step precision to avoid floating-point noise
+    var decimals = (step.toString().split('.')[1] || '').length;
+    val = parseFloat(val.toFixed(Math.max(decimals, 0)));
+
+    t.value = val;
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+    t.dispatchEvent(new Event('change', { bubbles: true }));
+  }, { passive: false });
+}
 function showLoading(t) { document.getElementById('loadingText').textContent = t || '处理中...'; document.getElementById('loadingProgress').classList.add('hidden'); document.getElementById('loadingDetail').classList.add('hidden'); document.getElementById('loading').classList.remove('hidden'); }
 function hideLoading() { document.getElementById('loading').classList.add('hidden'); document.getElementById('loadingProgress').classList.add('hidden'); document.getElementById('loadingDetail').classList.add('hidden'); }
 function updateLoadingProgress(phase, current, total) {
@@ -2552,9 +2586,9 @@ loadSettings();
     }
   }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function() { showApp(); bindFooterTextEvent(); });
+    document.addEventListener('DOMContentLoaded', function() { showApp(); bindFooterTextEvent(); setupInputWheelSupport(); });
   } else {
-    showApp(); bindFooterTextEvent();
+    showApp(); bindFooterTextEvent(); setupInputWheelSupport();
   }
   setTimeout(showApp, 2000);
 })();
