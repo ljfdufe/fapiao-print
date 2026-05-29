@@ -93,7 +93,18 @@ function createFileObj(opts) {
     slotOffsetX: opts.slotOffsetX || 0,    // X offset in mm (0 = centered)
     slotOffsetY: opts.slotOffsetY || 0     // Y offset in mm (0 = centered)
   };
-}
+
+  // Apply saved per-file adjustments if memory is enabled
+  if (S.feat.slotAdjMemory && S._fileAdjMap) {
+    var saved = S._fileAdjMap[obj.name];
+    if (saved) {
+      obj.slotScale = saved.scale != null ? saved.scale : obj.slotScale;
+      obj.slotOffsetX = saved.offX != null ? saved.offX : obj.slotOffsetX;
+      obj.slotOffsetY = saved.offY != null ? saved.offY : obj.slotOffsetY;
+    }
+  }
+
+  return obj;
 
 // =====================================================
 // Helpers
@@ -1772,13 +1783,11 @@ function setSlotAlignment(alignH, alignV) {
   var slot = layout.slots[S.selectedSlot];
   if (!slot) return;
 
-  // Get image dimensions, accounting for rotation swap
+  // Use unrotated image dimensions — same as renderPage.
+  // renderPage computes wrapper box size from f.ow/f.oh (unrotated),
+  // then applies rotation as a CSS transform. Alignment must match.
   var imgObjW = f.ow || 1;
   var imgObjH = f.oh || 1;
-  var rot = getRotation(f, slot, settings);
-  if (rot % 180 !== 0) {
-    var tmp = imgObjW; imgObjW = imgObjH; imgObjH = tmp;
-  }
 
   var slotW_mm = slot.w / MM2PX;
   var slotH_mm = slot.h / MM2PX;
@@ -1786,13 +1795,19 @@ function setSlotAlignment(alignH, alignV) {
   // Calculate contained wrapper dimensions in mm (mirrors renderPage)
   var containedW_mm, containedH_mm;
   if (settings.fitMode === 'original') {
-    containedW_mm = imgObjW;
-    containedH_mm = imgObjH;
+    // original mode: image displays at native resolution; for alignment
+    // we convert native px→mm using the render DPI the image was produced at.
+    // If renderDpi is not set, fall back to PDF_PREVIEW_DPI (150).
+    var rDpi = f.renderDpi || 150;
+    var oPxPerMm = rDpi / 25.4;
+    containedW_mm = imgObjW / oPxPerMm;
+    containedH_mm = imgObjH / oPxPerMm;
   } else if (settings.fitMode === 'fill') {
     containedW_mm = slotW_mm;
     containedH_mm = slotH_mm;
   } else {
     // contain / custom: aspect-ratio fit inside slot
+    // Both slot.w and imgObjW are in CSS coordinate space; ratio is correct.
     var fitScale = Math.min(slot.w / imgObjW, slot.h / imgObjH);
     containedW_mm = (imgObjW * fitScale) / MM2PX;
     containedH_mm = (imgObjH * fitScale) / MM2PX;
@@ -2182,8 +2197,24 @@ function saveSettings() {
     printMode: document.getElementById('printMode').value,
     feat: {}
   };
-  var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM'];
+  var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory'];
   featKeys.forEach(function(k) { o.feat[k] = S.feat[k]; });
+  // Save per-file slot adjustments when memory is enabled
+  if (S.feat.slotAdjMemory) {
+    var adjMap = {};
+    S.files.forEach(function(f) {
+      if (f.name && (f.slotScale !== undefined || f.slotOffsetX !== undefined || f.slotOffsetY !== undefined)) {
+        adjMap[f.name] = {
+          scale: f.slotScale || 1,
+          offX: f.slotOffsetX || 0,
+          offY: f.slotOffsetY || 0
+        };
+      }
+    });
+    if (Object.keys(adjMap).length > 0) {
+      o.fileAdjustments = adjMap;
+    }
+  }
   if (S.feat.watermark) {
     o.wmText = document.getElementById('wmText').value;
     o.wmOpacity = document.getElementById('wmOpacity').value;
@@ -2240,7 +2271,8 @@ function loadSettings() {
       cutline: 'toggleCutline', number: 'toggleNumber', border: 'toggleBorder',
       trimWhite: 'toggleTrimWhite', watermark: 'toggleWatermark', collate: 'toggleCollate',
       duplex: 'toggleDuplex', pageNum: 'togglePageNum', printDate: 'toggleDate',
-      footer: 'toggleFooter', autoOpenPdf: 'toggleAutoOpenPdf', customFM: 'toggleCustomFM'
+      footer: 'toggleFooter', autoOpenPdf: 'toggleAutoOpenPdf', customFM: 'toggleCustomFM',
+      slotAdjMemory: 'toggleSlotAdjMemory'
     };
     Object.keys(featMap).forEach(function(k) {
       if (o.feat[k] != null) {
@@ -2277,6 +2309,8 @@ function loadSettings() {
       }
     }
   }
+  // Load saved per-file slot adjustments (applied when files are added)
+  S._fileAdjMap = (o.fileAdjustments && S.feat.slotAdjMemory) ? o.fileAdjustments : {};
 }
 
 function togglePref(k, btn) {
