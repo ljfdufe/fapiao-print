@@ -524,9 +524,21 @@ async function savePdf() {
       var now = new Date();
       var ts = now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0') + '_' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0') + String(now.getSeconds()).padStart(2, '0');
       var defaultName = '发票打印_' + ts + '.pdf';
+      // Validate savedDir exists before using it (os error 3 if deleted/moved)
+      var dirExists = false;
       if (savedDir) {
+        try {
+          var checkResult = await invoke('check_path_exists', { path: savedDir });
+          dirExists = checkResult && checkResult.exists;
+        } catch(e) { /* ignore, fallback to dialog */ }
+      }
+      if (savedDir && dirExists) {
         savePath = savedDir + (savedDir.endsWith('\\') || savedDir.endsWith('/') ? '' : '\\') + defaultName;
       } else {
+        if (savedDir && !dirExists) {
+          console.warn('Saved directory no longer exists, clearing:', savedDir);
+          clearSaveDir();
+        }
         savePath = await invoke('plugin:dialog|save', {
           options: {
             title: '保存发票PDF',
@@ -547,24 +559,34 @@ async function savePdf() {
   // 检查是否可以利用缓存
   if (canUseCachedPdf(currentRequest) && isTauri && invoke) {
     try {
-      showLoading('正在复制缓存PDF...');
-      // 直接复制缓存的 PDF 文件到目标位置
-      var copyResult = await invoke('copy_file', {
-        srcPath: _lastPdfPath,
-        destPath: savePath
-      });
-      hideLoading();
-      if (copyResult && copyResult.success) {
-        toast('\u2705 PDF已保存（利用缓存）: ' + savePath);
-        // Auto-open using ShellExecute (more reliable than open_url + file:///)
-        if (S.feat.autoOpenPdf && savePath) {
-          try { invoke('open_file', { path: savePath }); } catch(e) {}
+      // Verify cached file still exists before attempting copy
+      var srcExists = false;
+      try {
+        var checkResult = await invoke('check_path_exists', { path: _lastPdfPath });
+        srcExists = checkResult && checkResult.exists && checkResult.isFile;
+      } catch(e) { /* ignore */ }
+      if (!srcExists) {
+        console.warn('Cached PDF no longer exists, regenerating:', _lastPdfPath);
+        _lastPdfPath = null;
+      } else {
+        showLoading('正在复制缓存PDF...');
+        var copyResult = await invoke('copy_file', {
+          srcPath: _lastPdfPath,
+          destPath: savePath
+        });
+        hideLoading();
+        if (copyResult && copyResult.success) {
+          toast('\u2705 PDF已保存（利用缓存）: ' + savePath);
+          if (S.feat.autoOpenPdf && savePath) {
+            try { invoke('open_file', { path: savePath }); } catch(e) {}
+          }
+          return;
         }
-        return;
       }
     } catch(e) {
       hideLoading();
       console.warn('Cached PDF copy failed, regenerating:', e);
+      _lastPdfPath = null;
     }
   }
 

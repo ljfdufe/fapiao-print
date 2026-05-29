@@ -184,15 +184,40 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Copy a file from srcPath to destPath
+/// Check whether a path exists and whether it's a directory
+#[command]
+fn check_path_exists(path: String) -> Result<serde_json::Value, String> {
+    let p = std::path::Path::new(&path);
+    Ok(serde_json::json!({
+        "exists": p.exists(),
+        "isDir": p.is_dir(),
+        "isFile": p.is_file(),
+        "path": path
+    }))
+}
+
+/// Copy a file from srcPath to destPath.
+/// Creates parent directories for the destination if they don't exist.
 #[command]
 fn copy_file(src_path: String, dest_path: String) -> Result<serde_json::Value, String> {
-    std::fs::copy(&src_path, &dest_path)
-        .map_err(|e| format!("Failed to copy file: {}", e))?;
+    let src = std::path::Path::new(&src_path);
+    if !src.exists() {
+        return Err(format!("Failed to copy file: 源文件不存在: {}", src_path));
+    }
+    let dest = std::path::Path::new(&dest_path);
+    if let Some(parent) = dest.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to copy file: 无法创建目标目录 '{}': {}", parent.display(), e))?;
+        }
+    }
+    let size = std::fs::copy(src, dest)
+        .map_err(|e| format!("Failed to copy file: {} → {}: {}", src_path, dest_path, e))?;
     Ok(serde_json::json!({
         "success": true,
         "srcPath": src_path,
-        "destPath": dest_path
+        "destPath": dest_path,
+        "size": size
     }))
 }
 
@@ -1174,6 +1199,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        check_path_exists,
         ocr_image,
         ocr_pdf_page,
         check_ocr_available,
@@ -1208,6 +1234,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        check_path_exists,
         check_ocr_available,
         extract_pdf_text,
         extract_pdf_texts,
