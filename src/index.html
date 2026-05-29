@@ -144,6 +144,20 @@
                 <button class="btn btn-sm" style="flex:1" onclick="resetSlotAdj()">重置</button>
                 <button class="btn btn-sm" style="flex:1" onclick="applySlotAdjToAll()">应用到全部</button>
               </div>
+              <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">快速对齐</div>
+                <div style="display:flex;gap:4px">
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('left','top')" title="左上">↖</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('center','top')" title="上对齐">↑</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('right','top')" title="右上">↗</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('left','center')" title="左对齐">←</button>
+                  <button class="btn btn-sm btn-primary" style="flex:1.5" onclick="setSlotAlignment('center','center')" title="居中">⊙ 居中</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('right','center')" title="右对齐">→</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('left','bottom')" title="左下">↙</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('center','bottom')" title="下对齐">↓</button>
+                  <button class="btn btn-sm" style="flex:1" onclick="setSlotAlignment('right','bottom')" title="右下">↘</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

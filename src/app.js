@@ -1758,6 +1758,64 @@ function applySlotAdjToAll() {
   toast('已应用到全部 ' + S.files.length + ' 张发票');
 }
 
+/**
+ * Quick alignment: snap the selected invoice to a slot edge or center.
+ * @param {string} alignH - 'left' | 'center' | 'right'
+ * @param {string} alignV - 'top' | 'center' | 'bottom'
+ */
+function setSlotAlignment(alignH, alignV) {
+  var f = getSelectedFileObj();
+  if (!f) return;
+
+  var settings = getSettings();
+  var layout = calculateLayout(settings);
+  var slot = layout.slots[S.selectedSlot];
+  if (!slot) return;
+
+  // Get image dimensions, accounting for rotation swap
+  var imgObjW = f.ow || 1;
+  var imgObjH = f.oh || 1;
+  var rot = getRotation(f, slot, settings);
+  if (rot % 180 !== 0) {
+    var tmp = imgObjW; imgObjW = imgObjH; imgObjH = tmp;
+  }
+
+  var slotW_mm = slot.w / MM2PX;
+  var slotH_mm = slot.h / MM2PX;
+
+  // Calculate contained wrapper dimensions in mm (mirrors renderPage)
+  var containedW_mm, containedH_mm;
+  if (settings.fitMode === 'original') {
+    containedW_mm = imgObjW;
+    containedH_mm = imgObjH;
+  } else if (settings.fitMode === 'fill') {
+    containedW_mm = slotW_mm;
+    containedH_mm = slotH_mm;
+  } else {
+    // contain / custom: aspect-ratio fit inside slot
+    var fitScale = Math.min(slot.w / imgObjW, slot.h / imgObjH);
+    containedW_mm = (imgObjW * fitScale) / MM2PX;
+    containedH_mm = (imgObjH * fitScale) / MM2PX;
+  }
+
+  // Half-gap between slot edge and wrapper edge when centered
+  var gapX = (slotW_mm - containedW_mm) / 2;
+  var gapY = (slotH_mm - containedH_mm) / 2;
+
+  // Offset to move wrapper from centered position to target alignment
+  var offsetX = 0, offsetY = 0;
+  if (alignH === 'left')  offsetX = -gapX;
+  if (alignH === 'right') offsetX =  gapX;
+  if (alignV === 'top')   offsetY = -gapY;
+  if (alignV === 'bottom') offsetY =  gapY;
+
+  f.slotOffsetX = Math.round(offsetX * 10) / 10;
+  f.slotOffsetY = Math.round(offsetY * 10) / 10;
+
+  updateAdjPanel();
+  updatePreview();
+}
+
 // =====================================================
 // Layout / Settings
 // =====================================================
