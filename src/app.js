@@ -51,7 +51,7 @@ var _newFileIds = {};
 // File Object Factory — unified creation with defaults
 // =====================================================
 function createFileObj(opts) {
-  return {
+  var obj = {
     id: opts.id || ('f' + Date.now() + Math.random().toString(36).slice(2)),
     name: opts.name || '',
     size: opts.size || 0,
@@ -105,6 +105,7 @@ function createFileObj(opts) {
   }
 
   return obj;
+}
 
 // =====================================================
 // Helpers
