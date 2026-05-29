@@ -294,6 +294,14 @@ async fn extract_pdf_texts(pdf_path: String, page_indices: Vec<u32>) -> Result<s
     .map_err(|e| format!("PDF文字提取任务失败: {}", e))?
 }
 
+/// Get user Downloads directory path
+#[command]
+fn get_downloads_dir() -> Result<String, String> {
+    dirs::download_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "无法获取下载目录".to_string())
+}
+
 /// Get app version from Cargo.toml (compiled in at build time)
 #[command]
 fn get_app_version() -> String {
@@ -1200,6 +1208,7 @@ pub fn run() {
         open_file,
         copy_file,
         check_path_exists,
+        get_downloads_dir,
         ocr_image,
         ocr_pdf_page,
         check_ocr_available,
@@ -1235,6 +1244,7 @@ pub fn run() {
         open_file,
         copy_file,
         check_path_exists,
+        get_downloads_dir,
         check_ocr_available,
         extract_pdf_text,
         extract_pdf_texts,

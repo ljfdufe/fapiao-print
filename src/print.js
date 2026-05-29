@@ -539,10 +539,15 @@ async function savePdf() {
           console.warn('Saved directory no longer exists, clearing:', savedDir);
           clearSaveDir();
         }
+        // Default to Downloads directory
+        var defaultDir = savedDir;
+        if (!defaultDir) {
+          try { defaultDir = await invoke('get_downloads_dir'); } catch(e) { /* ignore */ }
+        }
         savePath = await invoke('plugin:dialog|save', {
           options: {
             title: '保存发票PDF',
-            defaultPath: defaultName,
+            defaultPath: defaultDir ? (defaultDir + (defaultDir.endsWith('\\') || defaultDir.endsWith('/') ? '' : '\\') + defaultName) : defaultName,
             filters: [{ name: 'PDF文件', extensions: ['pdf'] }]
           }
         });
