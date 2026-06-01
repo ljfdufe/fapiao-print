@@ -2511,8 +2511,15 @@ document.getElementById('previewWrap').addEventListener('wheel', function(e) {
   }
 }, { passive: false });
 
-// Double-click to reset zoom
-document.getElementById('previewWrap').addEventListener('dblclick', function() {
+// Double-click: on selected slot → reset per-slot adj (size+position); elsewhere → reset preview zoom
+document.getElementById('previewWrap').addEventListener('dblclick', function(e) {
+  if (S.selectedSlot >= 0) {
+    var slotEl = e.target.closest('.invoice-slot');
+    if (slotEl && parseInt(slotEl.dataset.slotIdx) === S.selectedSlot) {
+      resetSlotAdj();
+      return;
+    }
+  }
   if (S.viewZoom !== 0) { setZoom('fit'); }
 });
 
