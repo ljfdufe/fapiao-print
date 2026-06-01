@@ -1632,7 +1632,7 @@ function openInvModal(i) {
     mRF('旋转', '<select id="mRot" style="width:140px;flex:none"><option value="0" ' + (f.rotation === 0 ? 'selected' : '') + '>不旋转</option><option value="90" ' + (f.rotation === 90 ? 'selected' : '') + '>90\u00B0</option><option value="180" ' + (f.rotation === 180 ? 'selected' : '') + '>180\u00B0</option><option value="270" ' + (f.rotation === 270 ? 'selected' : '') + '>270\u00B0</option></select>') +
     '<div style="border-top:1px dashed var(--border);margin-top:4px;padding-top:8px">' +
     '<div style="font-size:11px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">🎯 单票调整</div>' +
-    mRF('缩放', '<input type="number" id="mSlotScale" value="' + Math.round((f.slotScale || 1) * 100) + '" min="20" max="200" style="' + _fw + '"><span style="font-size:11px;color:var(--text-muted);width:16px;flex-shrink:0;text-align:left">%</span>') +
+    mRF('缩放', '<input type="number" id="mSlotScale" value="' + Math.round((f.slotScale || 1) * 100) + '" min="20" max="300" style="' + _fw + '"><span style="font-size:11px;color:var(--text-muted);width:16px;flex-shrink:0;text-align:left">%</span>') +
     mRF('X偏移', '<input type="number" id="mSlotOffX" value="' + (f.slotOffsetX || 0) + '" min="-50" max="50" step="0.5" style="' + _fw + '"><span style="font-size:11px;color:var(--text-muted);width:16px;flex-shrink:0;text-align:left">mm</span>') +
     mRF('Y偏移', '<input type="number" id="mSlotOffY" value="' + (f.slotOffsetY || 0) + '" min="-50" max="50" step="0.5" style="' + _fw + '"><span style="font-size:11px;color:var(--text-muted);width:16px;flex-shrink:0;text-align:left">mm</span>') +
     '</div>' +
@@ -1660,7 +1660,7 @@ function confirmInvModal() {
   f.buyerName = document.getElementById('mBuyer').value;
   f.buyerCreditCode = document.getElementById('mBuyerCreditCode').value;
   // Per-slot adjustments
-  f.slotScale = Math.max(0.2, Math.min(2.0, (parseInt(document.getElementById('mSlotScale').value) || 100) / 100));
+  f.slotScale = Math.max(0.2, Math.min(3.0, (parseInt(document.getElementById('mSlotScale').value) || 100) / 100));
   f.slotOffsetX = parseFloat(document.getElementById('mSlotOffX').value) || 0;
   f.slotOffsetY = parseFloat(document.getElementById('mSlotOffY').value) || 0;
   closeInvModal(); renderFileList(); updatePreview(); updateAmountSummary();
@@ -1735,7 +1735,7 @@ function updateAdjPanel() {
 function onAdjScaleChange() {
   var f = getSelectedFileObj();
   if (!f) return;
-  f.slotScale = Math.max(0.2, Math.min(2.0, parseInt(document.getElementById('adjScale').value) / 100));
+  f.slotScale = Math.max(0.2, Math.min(3.0, parseInt(document.getElementById('adjScale').value) / 100));
   updatePreview();
 }
 
@@ -2460,6 +2460,22 @@ document.addEventListener('keydown', function(e) {
 
 // Ctrl+Wheel zoom
 document.getElementById('previewWrap').addEventListener('wheel', function(e) {
+  if (!e.ctrlKey && S.selectedSlot >= 0) {
+    var slotEl = e.target.closest('.invoice-slot');
+    if (slotEl && parseInt(slotEl.dataset.slotIdx) === S.selectedSlot) {
+      e.preventDefault();
+      var f = getSelectedFileObj();
+      if (f) {
+        var step = 5;
+        var curPct = Math.round((f.slotScale || 1) * 100);
+        var newPct = e.deltaY > 0 ? curPct - step : curPct + step;
+        f.slotScale = Math.max(0.2, Math.min(3.0, newPct / 100));
+        updatePreview();
+        updateAdjPanel();
+        return;
+      }
+    }
+  }
   if (!e.ctrlKey) return;
   e.preventDefault();
   var step = 5;

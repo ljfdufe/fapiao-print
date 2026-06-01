@@ -378,8 +378,33 @@ function onSlotMouseMove(e) {
     var newOffY = _slotDrag.startOffY + dyMm;
     // Clamp: limit offset so invoice doesn't go fully outside slot
     var slot = layout.slots[_slotDrag.idx];
-    var maxOffX = (slot.w / MM2PX) * 0.5;
-    var maxOffY = (slot.h / MM2PX) * 0.5;
+    var f = _slotDrag.fileObj;
+    var imgW = f.ow || 1;
+    var imgH = f.oh || 1;
+    var s = _slotDrag.cachedSettings;
+    var displayW, displayH;
+    if (s.fitMode === 'fill') {
+      displayW = slot.w * (f.slotScale || 1);
+      displayH = slot.h * (f.slotScale || 1);
+    } else if (s.fitMode === 'original') {
+      displayW = imgW * (f.slotScale || 1);
+      displayH = imgH * (f.slotScale || 1);
+    } else {
+      var fitScale = Math.min(slot.w / imgW, slot.h / imgH);
+      var perScale = f.slotScale || 1;
+      displayW = imgW * fitScale * perScale;
+      displayH = imgH * fitScale * perScale;
+      if (s.fitMode === 'custom' && s.customScale !== 1) {
+        displayW *= s.customScale;
+        displayH *= s.customScale;
+      }
+    }
+    var extraX = Math.max(0, (displayW - slot.w) / 2 / MM2PX);
+    var extraY = Math.max(0, (displayH - slot.h) / 2 / MM2PX);
+    var minRangeX = (slot.w / MM2PX) * 0.5;
+    var minRangeY = (slot.h / MM2PX) * 0.5;
+    var maxOffX = Math.max(minRangeX, extraX);
+    var maxOffY = Math.max(minRangeY, extraY);
     newOffX = Math.max(-maxOffX, Math.min(maxOffX, newOffX));
     newOffY = Math.max(-maxOffY, Math.min(maxOffY, newOffY));
     _slotDrag.fileObj.slotOffsetX = Math.round(newOffX * 10) / 10;
@@ -396,7 +421,7 @@ function onSlotMouseMove(e) {
     var cy = slotRect.top + slotRect.height / 2;
     var dist = Math.hypot(e.clientX - cx, e.clientY - cy);
     var ratio = dist / _slotDrag.startDist;
-    var newScale = Math.max(0.2, Math.min(2.0, _slotDrag.startScale * ratio));
+    var newScale = Math.max(0.2, Math.min(3.0, _slotDrag.startScale * ratio));
     _slotDrag.fileObj.slotScale = Math.round(newScale * 100) / 100;
 
     // Real-time visual feedback
