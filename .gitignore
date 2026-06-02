@@ -39,6 +39,7 @@ screenshot_*.png
 dist/
 .claude/
 .trae/
+portable-git.7z.exe
 sample/
 sample.ofd
 sample_ofd_extracted/
