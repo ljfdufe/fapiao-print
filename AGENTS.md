@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v2.0.2
+- **版本**: v2.0.3
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -215,6 +215,18 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 ### copy_file 命令 (v1.10.5)
 
 新增 Rust 端文件复制命令，用于缓存 PDF 复用到保存路径。
+
+### 发票汇总表导出 (v2.0.3)
+
+**可编辑预览 + CSV 导出**，用于报销时生成发票明细汇总表。
+
+- **入口**: 侧边栏左下角金额汇总旁 📊 按钮
+- **弹窗**: 14 个字段按需勾选（全选/取消全选），列选择和备注持久化到 `fapiao-settings`
+- **编辑**: 金额/文本双击编辑，`setSummaryCellValue()` 回写 `fileObj`，自动触发 `renderFileList()` + `updateAmountSummary()` + `updatePreview()` 全 UI 同步
+- **合计**: 三种金额（含税/不含税/税额）分别汇总，合计行 `position:sticky;bottom:0` 始终可见
+- **导出**: `exportSummaryCsv()` — UTF-8 BOM + CRLF，CSV 纯手写零依赖，`write_text_file` (async+spawn_blocking) 写入磁盘，导出后 `open_file` 打开文件夹
+- **数据源**: `getCheckedFiles()` — 不含 `copies` 展开的已勾选文件列表，区别于 `getActiveFiles()`
+- **编辑标记**: `_summaryOriginalData` 快照对比，修改过的单元格黄色高亮
 
 ---
 
