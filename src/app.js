@@ -104,6 +104,11 @@ function createFileObj(opts) {
     }
   }
 
+  // Restore saved note for this file
+  if (S._notesMap && S._notesMap[obj.name]) {
+    obj.note = S._notesMap[obj.name];
+  }
+
   return obj;
 }
 
@@ -529,7 +534,7 @@ async function processFileDataList(fileDataList) {
   });
 
   // Render placeholders immediately — user sees skeleton items right away
-  renderFileList(); updatePreview(); updatePrintBtn();
+  renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
 
   // Show "加载中" toast immediately with spinner
   toastLoading('加载中 0/' + total);
@@ -554,7 +559,7 @@ async function processFileDataList(fileDataList) {
 
   var updateInterval = setInterval(function() {
     if (hasNewResults) {
-      renderFileList(); updatePreview(); updatePrintBtn();
+      renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
       hasNewResults = false;
     }
   }, updateIntervalMs);
@@ -604,7 +609,7 @@ async function processFileDataList(fileDataList) {
   }
 
   clearInterval(updateInterval);
-  renderFileList(); updatePreview(); updatePrintBtn();
+  renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
 
   _loadingBatchActive = false;
 
@@ -646,7 +651,7 @@ async function processFiles(files) {
     S.files.push(ph);
     _newFileIds[ph.id] = true;
   });
-  renderFileList(); updatePreview(); updatePrintBtn();
+  renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
 
   // Show "加载中" toast immediately with spinner
   toastLoading('加载中 0/' + total);
@@ -703,7 +708,7 @@ async function processFiles(files) {
       }
     }
 
-    renderFileList(); updatePreview(); updatePrintBtn();
+    renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
 
     // Yield to browser for painting — ensures user sees each file appear incrementally
     await nextFrame();
@@ -741,7 +746,7 @@ async function processFilesIncremental(paths) {
     _newFileIds[ph.id] = true;
     placeholders.push(ph);
   });
-  renderFileList(); updatePreview(); updatePrintBtn();
+  renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
 
   document.getElementById('fileList').classList.add('batch-loading');
   toastLoading('加载中 0/' + total);
@@ -819,7 +824,7 @@ async function processFilesIncremental(paths) {
       }
     }
 
-    renderFileList(); updatePreview(); updatePrintBtn();
+    renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn();
     await nextFrame();
   }
 
@@ -1454,11 +1459,11 @@ function setAllCopies(e, n) {
   renderFileList();
   updatePreview();
 }
-function togCheck(i) { S.files[i].checked = !S.files[i].checked; renderFileList(); updatePreview(); }
-function selectAll() { S.files.forEach(function(f) { f.checked = true; }); renderFileList(); updatePreview(); }
-function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); renderFileList(); updatePreview(); }
-function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); renderFileList(); updatePreview(); updatePrintBtn(); }
-function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; renderFileList(); updatePreview(); updatePrintBtn(); }
+function togCheck(i) { S.files[i].checked = !S.files[i].checked; renderFileList(); updatePreview(); updateSummaryBtn(); }
+function selectAll() { S.files.forEach(function(f) { f.checked = true; }); renderFileList(); updatePreview(); updateSummaryBtn(); }
+function deselectAll() { S.files.forEach(function(f) { f.checked = false; }); renderFileList(); updatePreview(); updateSummaryBtn(); }
+function deleteSelected() { if (!S.files.some(function(f) { return f.checked; })) return; S.files = S.files.filter(function(f) { return !f.checked; }); renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn(); }
+function rmFile(i) { S.files.splice(i, 1); if (_activeFileIdx === i) _activeFileIdx = -1; else if (_activeFileIdx > i) _activeFileIdx--; renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn(); }
 function rotFile(i) { S.files[i].rotation = (S.files[i].rotation + 90) % 360; renderFileList(); updatePreview(); }
 function ocrFile(i) {
   var f = S.files[i];
@@ -1485,7 +1490,7 @@ function ocrAll() {
   toastLoading('识别中，共 ' + targets.length + ' 张...');
   targets.forEach(function(f) { applyOcrAsync(f, f.previewUrl); });
 }
-function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; renderFileList(); updatePreview(); updatePrintBtn(); }
+function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn(); }
 
 // Click file item → navigate preview to the page containing this invoice
 function clickFileItem(idx, event) {
@@ -1572,8 +1577,16 @@ function updateAmountSummary() {
   var withAmt = checked.filter(function(f) { return (f.amountTax || f.amountNoTax) > 0; }).length;
   var warnAmt = checked.filter(function(f) { return f._amtValidationFail; }).length;
 
-  el.style.display = checked.length > 0 ? '' : 'none';
-  if (checked.length === 0) return;
+  // Container visibility: show when files exist, hide when empty
+  // (renderFileList handles the initial show/hide; we only override when truly empty)
+  if (!S.files.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  if (checked.length === 0) {
+    var textEl = document.getElementById('amountSummaryText');
+    if (textEl) textEl.innerHTML = '';
+    return;
+  }
 
   var countHtml = '<span class="amt-count">' + withAmt + '/' + checked.length + ' 张已识别</span>';
   if (warnAmt > 0) {
@@ -1599,9 +1612,10 @@ function updateAmountSummary() {
     if (f.sellerName) { var n = f.sellerName.trim(); if (sellerNames.indexOf(n) < 0) sellerNames.push(n); }
   });
   var sellerHtml = sellerNames.length > 0
-    ? '<div style="font-size:10px;color:var(--text-muted);margin-top:2px">' + sellerNames.length + '个销售方</div>'
+    ? '<span style="font-size:10px;color:var(--text-muted);margin-left:6px">' + sellerNames.length + '个销售方</span>'
     : '';
-  el.innerHTML = countHtml + amtHtml + sellerHtml;
+  var textEl = document.getElementById('amountSummaryText');
+  if (textEl) textEl.innerHTML = countHtml + amtHtml + sellerHtml;
 
   // Total amount is already shown in amountSummary (bottom-left), no need to duplicate in statusbar
 }
@@ -2057,6 +2071,11 @@ function getSettings() {
   };
 }
 
+// Get checked files WITHOUT copies expansion (for summary table, etc.)
+function getCheckedFiles() {
+  return S.files.filter(function(f) { return f.checked && !f._loading; });
+}
+
 function getActiveFiles() {
   var files = S.files.filter(function(f) { return f.checked && !f._loading; });
   if (document.getElementById('pageOrder').value === 'reverse') files = files.slice().reverse();
@@ -2178,6 +2197,7 @@ document.addEventListener('click', function(e) {
   }
 });
 function updatePrintBtn() { document.getElementById('printBtn').disabled = !S.files.some(function(f) { return f.checked; }); }
+function updateSummaryBtn() { var btn = document.getElementById('summaryBtn'); if (btn) btn.disabled = !S.files.some(function(f) { return f.checked; }); }
 
 // =====================================================
 // Save settings & Preferences
@@ -2235,6 +2255,13 @@ function saveSettings() {
   if (S.feat.customFM || S.feat.pageNum || S.feat.printDate || S.feat.footer) {
     o.footerMargin = document.getElementById('footerMargin').value;
   }
+  if (_summaryActiveCols && _summaryActiveCols.length > 0) {
+    o.summaryCols = _summaryActiveCols;
+  }
+  // Persist per-file notes (keyed by file name)
+  var notesMap = {};
+  S.files.forEach(function(f) { if (f.note && f.name) notesMap[f.name] = f.note; });
+  if (Object.keys(notesMap).length > 0) o.summaryNotes = notesMap;
   try { localStorage.setItem('fapiao-settings', JSON.stringify(o)); } catch(e) {}
 }
 
@@ -2316,6 +2343,12 @@ function loadSettings() {
       }
     }
   }
+  // Restore summary table column selection
+  if (o.summaryCols && Array.isArray(o.summaryCols) && o.summaryCols.length > 0) {
+    _summaryActiveCols = o.summaryCols;
+  }
+  // Restore per-file notes (applied when files are added)
+  S._notesMap = o.summaryNotes || {};
   // Load saved per-file slot adjustments (applied when files are added)
   S._fileAdjMap = (o.fileAdjustments && S.feat.slotAdjMemory) ? o.fileAdjustments : {};
 }
@@ -2714,6 +2747,290 @@ loadSettings();
   }
   setTimeout(showApp, 2000);
 })();
+
+// =====================================================
+// 发票汇总表 — 可编辑预览 + CSV 导出
+// =====================================================
+
+var SUMMARY_FIELDS = [
+  { key: 'seq',       label: '序号',     type: 'seq',     default: true, editable: false },
+  { key: 'invoiceNo', label: '发票号码',  type: 'text',    default: true, editable: true },
+  { key: 'invoiceDate',label: '开票日期', type: 'text',    default: true, editable: true },
+  { key: 'invoiceType',label:'发票类型',  type: 'text',    default: false, editable: false },
+  { key: 'sellerName',label:'销售方名称', type: 'text',    default: true, editable: true },
+  { key: 'sellerCreditCode',label:'销售方税号', type:'text',default: false, editable: true },
+  { key: 'buyerName', label: '购买方名称',type: 'text',    default: false, editable: true },
+  { key: 'buyerCreditCode',label:'购买方税号',type:'text', default: false, editable: true },
+  { key: 'amountTax', label: '含税金额',  type: 'amount',  default: true, editable: true },
+  { key: 'amountNoTax',label:'不含税金额',type: 'amount',  default: false, editable: true },
+  { key: 'taxAmount', label: '税额',      type: 'amount',  default: false, editable: true },
+  { key: 'name',      label: '文件名',    type: 'text',    default: false, editable: true },
+  { key: 'copies',    label: '份数',      type: 'copies',  default: false, editable: true },
+  { key: 'note',      label: '备注',      type: 'text',    default: false, editable: true }
+];
+
+var _summaryActiveCols = []; // keys of currently visible columns
+var _summaryOriginalData = []; // snapshot of original values when modal opens
+
+function openSummaryModal() {
+  var files = getCheckedFiles();
+  if (!files.length) { toast('没有发票数据'); return; }
+
+  // Snapshot original values for edited-cell highlighting
+  _summaryOriginalData = files.map(function(f) {
+    var snap = {};
+    SUMMARY_FIELDS.forEach(function(field) {
+      if (field.editable) snap[field.key] = getSummaryCellValue(f, field, 0);
+    });
+    return snap;
+  });
+
+  // Use persisted column selection (restored by loadSettings), or fall back to defaults
+  if (!_summaryActiveCols || _summaryActiveCols.length === 0) {
+    _summaryActiveCols = [];
+    SUMMARY_FIELDS.forEach(function(f) { if (f.default) _summaryActiveCols.push(f.key); });
+  }
+
+  renderSummaryColumns();
+  renderSummaryTable();
+  document.getElementById('summaryModal').classList.remove('hidden');
+}
+
+function closeSummaryModal() {
+  // Persist column selection via unified settings
+  saveSettings();
+  document.getElementById('summaryModal').classList.add('hidden');
+}
+
+// Render the column checkbox bar
+function renderSummaryColumns() {
+  var html = '';
+  SUMMARY_FIELDS.forEach(function(f) {
+    if (f.key === 'seq') return; // seq always shown, no toggle
+    var checked = _summaryActiveCols.indexOf(f.key) >= 0 ? ' checked' : '';
+    html += '<label class="summary-col-label"><input type="checkbox" data-key="' + f.key + '" ' + checked + ' onchange="onSummaryColToggle(this)">' + f.label + '</label>';
+  });
+  html += '<span class="summary-col-actions"><a onclick="summarySelectAll()">全选</a><a onclick="summaryDeselectAll()">取消全选</a></span>';
+  document.getElementById('summaryColumns').innerHTML = html;
+}
+
+function onSummaryColToggle(cb) {
+  var key = cb.dataset.key;
+  var idx = _summaryActiveCols.indexOf(key);
+  if (cb.checked && idx < 0) _summaryActiveCols.push(key);
+  if (!cb.checked && idx >= 0) _summaryActiveCols.splice(idx, 1);
+  renderSummaryTable();
+}
+
+function summarySelectAll() {
+  _summaryActiveCols = [];
+  SUMMARY_FIELDS.forEach(function(f) { if (f.key !== 'seq') _summaryActiveCols.push(f.key); });
+  renderSummaryColumns();
+  renderSummaryTable();
+}
+
+function summaryDeselectAll() {
+  _summaryActiveCols = ['seq', 'invoiceNo'];
+  renderSummaryColumns();
+  renderSummaryTable();
+}
+
+// Get display value for a field on a fileObj
+function getSummaryCellValue(fileObj, field, idx) {
+  switch (field.key) {
+    case 'seq': return String(idx + 1);
+    case 'invoiceType':
+      if (fileObj._isTicket) return fileObj.sellerName || '车票'; // sellerName holds ticket label
+      if (fileObj._ocrText && /非税/.test(fileObj._ocrText)) return '非税票据';
+      return '增值税发票';
+    case 'amountTax': return fileObj.amountTax > 0 ? fileObj.amountTax.toFixed(2) : '';
+    case 'amountNoTax': return fileObj.amountNoTax > 0 ? fileObj.amountNoTax.toFixed(2) : '';
+    case 'taxAmount': return fileObj.taxAmount > 0 ? fileObj.taxAmount.toFixed(2) : '';
+    case 'copies': return String(fileObj.copies || 1);
+    default: return String(fileObj[field.key] || '');
+  }
+}
+
+// Sync edited value back to fileObj
+function setSummaryCellValue(fileObj, field, value) {
+  switch (field.key) {
+    case 'amountTax': fileObj.amountTax = parseFloat(value) || 0; break;
+    case 'amountNoTax': fileObj.amountNoTax = parseFloat(value) || 0; break;
+    case 'taxAmount': fileObj.taxAmount = parseFloat(value) || 0; break;
+    case 'copies': fileObj.copies = Math.max(1, parseInt(value) || 1); break;
+    case 'invoiceType': break; // doesn't sync back (derived field)
+    default: fileObj[field.key] = value; break;
+  }
+}
+
+// Render the data table based on current column selection
+function renderSummaryTable() {
+  var files = getCheckedFiles();
+  var visibleFields = SUMMARY_FIELDS.filter(function(f) { return _summaryActiveCols.indexOf(f.key) >= 0; });
+  if (visibleFields.length === 0) { _summaryActiveCols = ['seq', 'invoiceNo', 'amountTax']; visibleFields = SUMMARY_FIELDS.filter(function(f) { return _summaryActiveCols.indexOf(f.key) >= 0; }); }
+
+  // Table header
+  var html = '<thead><tr>';
+  visibleFields.forEach(function(f) {
+    var cls = '';
+    if (f.key === 'seq') cls = 'col-seq';
+    else if (f.type === 'amount' || f.type === 'copies') cls = 'col-' + (f.type === 'amount' ? 'amount' : 'copies');
+    html += '<th class="' + cls + '">' + f.label + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  var totalAmountTax = 0, totalAmountNoTax = 0, totalTaxAmount = 0;
+  files.forEach(function(fileObj, idx) {
+    html += '<tr>';
+    visibleFields.forEach(function(f) {
+      var val = getSummaryCellValue(fileObj, f, idx);
+      var cls = '';
+      if (f.key === 'seq') cls = 'col-seq';
+      else if (f.type === 'amount') cls = 'col-amount';
+      else if (f.key === 'copies') cls = 'col-copies';
+
+      if (!f.editable) {
+        html += '<td class="' + cls + ' summary-cell-static" style="padding:6px 10px">' + escHtml(val) + '</td>';
+      } else {
+        var inputCls = 'summary-cell-input' + (f.type === 'amount' || f.key === 'copies' ? ' number' : '');
+        var isEdited = _summaryOriginalData[idx] && _summaryOriginalData[idx][f.key] !== undefined && _summaryOriginalData[idx][f.key] !== val;
+        if (isEdited) inputCls += ' edited';
+        html += '<td class="' + cls + '"><input class="' + inputCls + '" value="' + escHtml(val) + '" data-idx="' + idx + '" data-key="' + f.key + '" onchange="onSummaryCellEdit(this)" onfocus="this.select()"></td>';
+      }
+
+      if (f.key === 'amountTax' && fileObj.amountTax > 0) totalAmountTax += fileObj.amountTax;
+      if (f.key === 'amountNoTax' && fileObj.amountNoTax > 0) totalAmountNoTax += fileObj.amountNoTax;
+      if (f.key === 'taxAmount' && fileObj.taxAmount > 0) totalTaxAmount += fileObj.taxAmount;
+    });
+    html += '</tr>';
+  });
+
+  // Total row
+  html += '<tr class="summary-total-row">';
+  visibleFields.forEach(function(f, ci) {
+    if (f.key === 'amountTax') {
+      html += '<td class="col-amount"><span class="summary-total-cell">¥' + totalAmountTax.toFixed(2) + '</span></td>';
+    } else if (f.key === 'amountNoTax') {
+      html += '<td class="col-amount"><span class="summary-total-cell">¥' + totalAmountNoTax.toFixed(2) + '</span></td>';
+    } else if (f.key === 'taxAmount') {
+      html += '<td class="col-amount"><span class="summary-total-cell">¥' + totalTaxAmount.toFixed(2) + '</span></td>';
+    } else if (ci === 0) {
+      html += '<td class="col-seq summary-total-cell" style="padding:8px 10px">合计</td>';
+    } else {
+      html += '<td class="summary-total-cell" style="padding:8px 10px"></td>';
+    }
+  });
+  html += '</tr>';
+
+  html += '</tbody>';
+  document.getElementById('summaryTable').innerHTML = html;
+
+  // Update total below table
+  var totalEl = document.getElementById('summaryTotal');
+  totalEl.textContent = '共 ' + files.length + ' 张发票';
+}
+
+// Handle cell edit — sync back to fileObj + refresh all UI
+function onSummaryCellEdit(input) {
+  var idx = parseInt(input.dataset.idx);
+  var key = input.dataset.key;
+  var newVal = input.value;
+
+  var files = getCheckedFiles();
+  if (idx < 0 || idx >= files.length) return;
+
+  var field = null;
+  SUMMARY_FIELDS.forEach(function(f) { if (f.key === key) field = f; });
+  if (!field) return;
+
+  setSummaryCellValue(files[idx], field, newVal);
+
+  // Rebuild table to sync all cells (including total row)
+  renderSummaryTable();
+
+  // Sync file list badges + bottom amount summary
+  renderFileList();
+
+  // Refresh preview in case amounts are overlaid
+  updatePreview();
+}
+
+// Export to CSV (UTF-8 BOM for Excel compatibility)
+async function exportSummaryCsv() {
+  var files = getCheckedFiles();
+  if (!files.length) { toast('没有发票数据可导出'); return; }
+
+  var visibleFields = SUMMARY_FIELDS.filter(function(f) { return _summaryActiveCols.indexOf(f.key) >= 0; });
+  if (visibleFields.length === 0) return;
+
+  // Build CSV content
+  var rows = [];
+  // Header
+  rows.push(visibleFields.map(function(f) { return csvEscape(f.label); }).join(','));
+  // Data rows
+  files.forEach(function(fileObj, idx) {
+    rows.push(visibleFields.map(function(f) {
+      return csvEscape(getSummaryCellValue(fileObj, f, idx));
+    }).join(','));
+  });
+  // Total row
+  var totalAmountTax = files.reduce(function(s, f) { return s + (f.amountTax || 0); }, 0);
+  var totalAmountNoTax = files.reduce(function(s, f) { return s + (f.amountNoTax || 0); }, 0);
+  var totalTaxAmount = files.reduce(function(s, f) { return s + (f.taxAmount || 0); }, 0);
+  rows.push(visibleFields.map(function(f, ci) {
+    if (f.key === 'amountTax') return csvEscape(totalAmountTax.toFixed(2));
+    if (f.key === 'amountNoTax') return csvEscape(totalAmountNoTax.toFixed(2));
+    if (f.key === 'taxAmount') return csvEscape(totalTaxAmount.toFixed(2));
+    if (ci === 0) return csvEscape('合计');
+    return '';
+  }).join(','));
+
+  var csvContent = '\uFEFF' + rows.join('\r\n'); // UTF-8 BOM + CRLF for Excel
+
+  if (isTauri && invoke) {
+    try {
+      var defaultDir = '';
+      try { defaultDir = await invoke('get_downloads_dir'); } catch(e) {}
+      var ts = new Date();
+      var tsStr = ts.getFullYear() + String(ts.getMonth()+1).padStart(2,'0') + String(ts.getDate()).padStart(2,'0') + '_' + String(ts.getHours()).padStart(2,'0') + String(ts.getMinutes()).padStart(2,'0');
+      var defaultName = '发票汇总表_' + tsStr + '.csv';
+      var savePath = await invoke('plugin:dialog|save', {
+        options: {
+          title: '保存汇总表',
+          defaultPath: defaultDir ? (defaultDir + (defaultDir.endsWith('\\')||defaultDir.endsWith('/')?'':'\\') + defaultName) : defaultName,
+          filters: [{ name: 'CSV 文件', extensions: ['csv'] }]
+        }
+      });
+      if (!savePath) return;
+      await invoke('write_text_file', { path: savePath, content: csvContent });
+      closeSummaryModal();
+      // Open containing folder so user can find the file
+      var dirPath = savePath.substring(0, Math.max(savePath.lastIndexOf('\\'), savePath.lastIndexOf('/')));
+      try { await invoke('open_file', { path: dirPath }); } catch(e) {}
+      toast('已保存: ' + savePath);
+      // Update saveDir for future use
+      if (dirPath) localStorage.setItem('fapiao-save-dir', dirPath);
+    } catch(e) {
+      toast('导出失败: ' + e);
+    }
+  } else {
+    // Browser fallback: download via Blob
+    var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url; a.download = '发票汇总表.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    closeSummaryModal();
+    toast('汇总表已导出');
+  }
+}
+
+function csvEscape(val) {
+  var s = String(val || '');
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
 
 function bindFooterTextEvent() {
   var el = document.getElementById('footerText');

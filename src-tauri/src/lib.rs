@@ -221,6 +221,24 @@ fn copy_file(src_path: String, dest_path: String) -> Result<serde_json::Value, S
     }))
 }
 
+/// Write UTF-8 text content to a file (creates parent dirs if needed).
+/// Used by the CSV summary export feature.
+#[command]
+async fn write_text_file(path: String, content: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest = std::path::Path::new(&path);
+        if let Some(parent) = dest.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("无法创建目录 '{}': {}", parent.display(), e))?;
+            }
+        }
+        std::fs::write(dest, &content)
+            .map_err(|e| format!("写入文件失败: {}", e))?;
+        Ok(serde_json::json!({ "success": true, "path": path }))
+    }).await.map_err(|e| format!("任务执行失败: {}", e))?
+}
+
 /// Open a URL in the default browser
 #[command]
 fn open_url(url: String) -> Result<(), String> {
@@ -1207,6 +1225,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        write_text_file,
         check_path_exists,
         get_downloads_dir,
         ocr_image,
@@ -1243,6 +1262,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        write_text_file,
         check_path_exists,
         get_downloads_dir,
         check_ocr_available,

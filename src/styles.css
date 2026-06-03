@@ -183,9 +183,14 @@ input, textarea, select, [contenteditable="true"], .modal-body, .modal-body *, p
 .file-seller { line-height: 1.3; overflow: hidden; }
 .file-summary {
   padding: 10px 12px; border-top: 1px solid var(--border); background: var(--surface2);
-  font-size: 12px; display: flex; align-items: center; justify-content: space-between;
-  flex-shrink: 0;
+  font-size: 12px; display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; white-space: nowrap;
 }
+#amountSummaryText {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 6px;
+}
+#summaryBtn { flex-shrink: 0; width: 28px; height: 28px; }
 #fileList { flex: 1; overflow-y: auto; }
 .file-summary .amt-total { color: var(--success); font-weight: 700; font-size: 14px; }
 .file-summary .amt-count { color: var(--text-muted); }
@@ -472,6 +477,70 @@ html.dark .toast-spinner { border-color: rgba(26,26,46,0.3); border-top-color: #
 }
 .sort-btn:hover { color: var(--accent) !important; }
 .sort-btn.disabled { opacity: 0.15; cursor: default; pointer-events: none; }
+
+/* ===== Summary Table (导出汇总表) ===== */
+.summary-modal { width: 820px; max-width: 95vw; }
+.summary-columns {
+  display: flex; flex-wrap: wrap; gap: 6px 12px;
+  padding: 10px 12px; background: var(--surface2); border-radius: 8px;
+  margin-bottom: 12px; align-items: center;
+}
+.summary-col-label {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--text-secondary); cursor: pointer;
+  user-select: none; padding: 2px 4px; border-radius: 4px;
+  transition: background 0.15s;
+}
+.summary-col-label:hover { background: var(--border); }
+.summary-col-label input[type="checkbox"] { cursor: pointer; margin: 0; accent-color: var(--accent); }
+.summary-col-actions { margin-left: auto; display: flex; gap: 8px; }
+.summary-col-actions a { font-size: 11px; color: var(--accent); cursor: pointer; }
+.summary-col-actions a:hover { color: var(--accent-hover); }
+
+.summary-table-wrap { overflow: auto; max-height: 50vh; border: 1px solid var(--border); border-radius: 8px; }
+.summary-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.summary-table th {
+  position: sticky; top: 0; background: var(--surface2); z-index: 1;
+  padding: 8px 10px; text-align: left; font-weight: 600; color: var(--text-primary);
+  border-bottom: 2px solid var(--border); white-space: nowrap;
+}
+.summary-table td { padding: 0; border-bottom: 1px solid var(--border); }
+.summary-table tr:last-child td { border-bottom: none; }
+.summary-table tr:nth-child(even) td { background: var(--surface2); }
+.summary-table .col-seq { width: 40px; text-align: center; }
+.summary-table .col-amount { text-align: right; }
+.summary-table .col-copies { text-align: center; width: 50px; }
+
+/* Editable cell input */
+.summary-cell-input {
+  width: 100%; border: none; background: transparent; padding: 6px 10px;
+  font-size: 12px; color: var(--text-primary); font-family: inherit;
+  outline: none; box-sizing: border-box;
+}
+.summary-cell-input:focus {
+  background: var(--accent-light); outline: 2px solid var(--accent);
+  outline-offset: -2px; border-radius: 2px;
+}
+.summary-cell-input.edited {
+  background: var(--warning-light);
+}
+.summary-cell-input.number { text-align: right; font-variant-numeric: tabular-nums; }
+.summary-cell-input.seq { text-align: center; color: var(--text-muted); cursor: default; }
+
+/* Total row — sticky to always visible */
+.summary-total-row td {
+  position: sticky; bottom: 0;
+  font-weight: 700; border-top: 2px solid var(--accent) !important;
+  background: var(--accent-light) !important; white-space: nowrap;
+}
+.summary-total-cell { padding: 8px 10px; font-size: 13px; color: var(--accent); }
+
+.summary-total { margin-top: 10px; text-align: right; font-size: 13px; color: var(--text-muted); }
+
+/* Dark theme overrides */
+html.dark .summary-cell-input:focus { background: #1e2a4a; }
+html.dark .summary-cell-input.edited { background: #3a3520; }
+html.dark .summary-total-row td { background: #1e2a4a !important; }
 
 /* ===== Scrollbar ===== */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
