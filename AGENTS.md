@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v2.0.4
+- **版本**: v2.0.5
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -212,9 +212,10 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 - **定时刷新 UI**: `setInterval` 按时间间隔批量更新 DOM，避免每个文件都触发重绘
 - **Toast 防抖**: toast 更新间隔从每文件变为 100ms 最低间隔
 
-### copy_file 命令 (v1.10.5)
+### copy_file / rename_file 命令 (v1.10.5 / v2.0.5)
 
-新增 Rust 端文件复制命令，用于缓存 PDF 复用到保存路径。
+- `copy_file(src, dest)` — Rust 端文件复制命令，用于缓存 PDF 复用到保存路径
+- `rename_file(src, dest)` — 文件重命名命令（async+spawn_blocking），同盘原子 rename，跨盘 copy+delete fallback
 
 ### PDF 印章烘焙 (v2.0.4)
 
@@ -226,6 +227,20 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 - **内容流顺序**: 后缀 `Q`（恢复图形状态）**先于**标注绘制命令 `q matrix /__AnnotN Do Q`，避免 CTM 缩放影响标注位置
 - **资源合并**: 标注 XObject 添加到 Form XObject 的 Resources 字典
 - **测试**: `test_722_annotation_baking`, `test_320101_annotation_baking`, `test_722_full_pdf_generation`, `test_722_e2e_passthrough`
+
+### 发票文件批量重命名 (v2.0.5)
+
+**汇总表内嵌重命名面板**，支持预设模板 + 自定义字段，一键批量重命名发票磁盘文件。
+
+- **入口**: 汇总表弹窗底部「🔄 重命名文件」按钮 → 展开内嵌面板
+- **模板**: 3 个预设（金额+销售方+号码 / 销售方+号码 / 金额+日期+号码）+ 自定义字段勾选，号码放最后防重名
+- **排序**: 勾选顺序 = 文件名顺序（后勾选的字段排在后面），底部显示当前顺序提示
+- **分隔符**: 默认 `_`，可自定义（最多 4 字符）
+- **预览**: `updateRenamePreview()` — 原文件名 → 新文件名，状态标识（✓/⚠/✗），`seenPaths` 多页 PDF 去重
+- **重名**: `resolveNameConflicts()` — 自动加 `_2`、`_3` 序号
+- **执行**: `executeRename()` → `invoke('rename_file')` 批量重命名，成功后同步 `S.files` 中所有共享路径、迁移 `_fileAdjMap` + `_notesMap` key
+- **Rust**: `rename_file` 命令（`async fn` + `spawn_blocking`），同盘 `fs::rename`（原子），跨盘 `copy + delete` fallback
+- **OFD**: 加载时设置 `filePath`；`print.js` 的 `sourceType` 判断 `type === 'ofd'` 优先于 `_filePath`，dedup key 排除 OFD
 
 ### 发票汇总表导出 (v2.0.3)
 
