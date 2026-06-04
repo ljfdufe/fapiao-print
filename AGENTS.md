@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v2.0.3
+- **版本**: v2.0.4
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -215,6 +215,17 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 ### copy_file 命令 (v1.10.5)
 
 新增 Rust 端文件复制命令，用于缓存 PDF 复用到保存路径。
+
+### PDF 印章烘焙 (v2.0.4)
+
+`extract_page_as_form_xobject()` 在提取 PDF 页面为 Form XObject 时，自动将页面标注（印章/签章）烘焙到内容流中。
+
+- **标注发现**: 读取页面 `/Annots` 数组，跳过隐藏标注（F bit 2）
+- **外观提取**: `/AP` → `/N` (Normal appearance)，经 `deep_copy_object` 完整迁移到输出文档
+- **坐标映射**: 标注 Rect [x1,y1,x2,y2] → Form BBox 坐标系的平移+缩放变换矩阵
+- **内容流顺序**: 后缀 `Q`（恢复图形状态）**先于**标注绘制命令 `q matrix /__AnnotN Do Q`，避免 CTM 缩放影响标注位置
+- **资源合并**: 标注 XObject 添加到 Form XObject 的 Resources 字典
+- **测试**: `test_722_annotation_baking`, `test_320101_annotation_baking`, `test_722_full_pdf_generation`, `test_722_e2e_passthrough`
 
 ### 发票汇总表导出 (v2.0.3)
 

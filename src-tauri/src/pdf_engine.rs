@@ -4723,7 +4723,7 @@ fn merge_resource_dict(
 fn extract_page_as_form_xobject(
     source: &lopdf::Document,
     page_id: lopdf::ObjectId,
-    output_doc: &mut lopdf::Document,
+    mut output_doc: &mut lopdf::Document,
     id_map: &mut std::collections::HashMap<lopdf::ObjectId, lopdf::ObjectId>,
 ) -> Result<(lopdf::ObjectId, f32, f32), String> {
     // 1. Get page content stream bytes (decompressed and concatenated)
@@ -4788,10 +4788,9 @@ fn extract_page_as_form_xobject(
     let mut suffix = Vec::new();
     suffix.extend_from_slice(b"\nQ\n");
 
-    // Combine: prefix + content + suffix
+    // Combine: prefix + content (annotations and suffix appended after /Annots processing)
     let mut final_content = prefix;
     final_content.extend_from_slice(&content_bytes);
-    final_content.extend_from_slice(&suffix);
 
     if rot != 0 {
         log::info!("extract_page_as_form_xobject: page rotation={}°, page {:.1}x{:.1}pt → effective {:.1}x{:.1}pt",
@@ -4813,10 +4812,222 @@ fn extract_page_as_form_xobject(
         merge_resource_dict(&mut merged, dict, source);
     }
 
-    let remapped_resources = {
+    let mut remapped_resources = {
         let obj = lopdf::Object::Dictionary(merged);
         remap_references(obj, source, output_doc, id_map)
     };
+
+    // 6.5 Process page annotations (stamps, signatures, etc.)
+    // Annotations are NOT part of the page content stream — they are separate objects
+    // in the page's /Annots array. PDF viewers render them on top of the page content,
+    // but lopdf's get_page_content() only returns the content stream, so we must
+    // explicitly extract annotation appearances and append them to the Form XObject.
+    let mut annot_draw_cmds = Vec::new();
+    let mut annot_xobjects: Vec<(Vec<u8>, lopdf::ObjectId)> = Vec::new();
+
+    if let Ok(page_dict) = source.get_dictionary(page_id) {
+        if let Ok(annots_obj) = page_dict.get(b"Annots") {
+            let annot_refs: Vec<lopdf::ObjectId> = match annots_obj {
+                lopdf::Object::Array(arr) => {
+                    arr.iter().filter_map(|o| {
+                        if let lopdf::Object::Reference(id) = o { Some(*id) } else { None }
+                    }).collect()
+                }
+                lopdf::Object::Reference(id) => vec![*id],
+                _ => vec![],
+            };
+
+            for (annot_idx, annot_id) in annot_refs.iter().enumerate() {
+                let annot_dict = match source.get_dictionary(*annot_id) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                // Skip hidden annotations (F bit 2 = Hidden)
+                if let Some(lopdf::Object::Integer(f)) = annot_dict.get(b"F").ok() {
+                    if *f & 2 != 0 { continue; }
+                }
+
+                // Get /AP → /N (normal appearance)
+                let normal_ap_obj = match annot_dict.get(b"AP") {
+                    Ok(lopdf::Object::Dictionary(ap_dict)) => {
+                        match ap_dict.get(b"N") {
+                            Ok(obj) => obj.clone(),
+                            Err(_) => continue,
+                        }
+                    }
+                    Ok(lopdf::Object::Reference(id)) => {
+                        match source.get_dictionary(*id) {
+                            Ok(ap_dict) => {
+                                match ap_dict.get(b"N") {
+                                    Ok(obj) => obj.clone(),
+                                    Err(_) => continue,
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                // Get annotation Rect [x1 y1 x2 y2]
+                let rect: Vec<f32> = match annot_dict.get(b"Rect") {
+                    Ok(lopdf::Object::Array(arr)) => {
+                        arr.iter().filter_map(|o| match o {
+                            lopdf::Object::Real(f) => Some(*f),
+                            lopdf::Object::Integer(i) => Some(*i as f32),
+                            lopdf::Object::Reference(id) => {
+                                source.get_object(*id).ok().and_then(|obj| match obj {
+                                    lopdf::Object::Real(f) => Some(*f),
+                                    lopdf::Object::Integer(i) => Some(*i as f32),
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        }).collect()
+                    }
+                    _ => continue,
+                };
+                if rect.len() != 4 { continue; }
+
+                // Deep copy the appearance XObject to output document
+                let ap_xobj_id = match normal_ap_obj {
+                    lopdf::Object::Reference(id) => {
+                        deep_copy_object(source, id, &mut output_doc, id_map)
+                    }
+                    lopdf::Object::Stream(_) => {
+                        let remapped = remap_references(normal_ap_obj, source, &mut output_doc, id_map);
+                        output_doc.add_object(remapped)
+                    }
+                    _ => continue,
+                };
+
+                // PDF spec requires annotation appearances to be rendered as isolated
+                // transparency groups. When baked into the content stream (instead of
+                // rendered by the viewer's annotation engine), we must explicitly add
+                // /Group<</S/Transparency/I true>> so blend modes (e.g. /BM/Darken)
+                // and SMask work correctly across all PDF readers.
+                if let Ok(lopdf::Object::Stream(ref mut s)) = output_doc.get_object_mut(ap_xobj_id) {
+                    if s.dict.get(b"Group").is_err() {
+                        let mut group = lopdf::Dictionary::new();
+                        group.set("S", lopdf::Object::Name(b"Transparency".to_vec()));
+                        group.set("I", lopdf::Object::Boolean(true));
+                        s.dict.set("Group", lopdf::Object::Dictionary(group));
+                    }
+                }
+
+                // Get the appearance BBox and Matrix from the deep-copied object
+                let (bbox, ap_matrix) = match output_doc.get_object(ap_xobj_id) {
+                    Ok(lopdf::Object::Stream(s)) => {
+                        let bb = match s.dict.get(b"BBox") {
+                            Ok(lopdf::Object::Array(arr)) => {
+                                arr.iter().filter_map(|o| match o {
+                                    lopdf::Object::Real(f) => Some(*f),
+                                    lopdf::Object::Integer(i) => Some(*i as f32),
+                                    _ => None,
+                                }).collect()
+                            }
+                            _ => vec![],
+                        };
+                        // Appearance Matrix [a b c d e f] — identity if absent
+                        let mat: Vec<f32> = match s.dict.get(b"Matrix") {
+                            Ok(lopdf::Object::Array(arr)) => {
+                                arr.iter().filter_map(|o| match o {
+                                    lopdf::Object::Real(f) => Some(*f),
+                                    lopdf::Object::Integer(i) => Some(*i as f32),
+                                    _ => None,
+                                }).collect()
+                            }
+                            _ => vec![],
+                        };
+                        (bb, mat)
+                    }
+                    _ => (vec![], vec![]),
+                };
+                // Default BBox from Rect dimensions if not found
+                let bbox = if bbox.len() == 4 { bbox } else {
+                    vec![0.0, 0.0, rect[2] - rect[0], rect[3] - rect[1]]
+                };
+
+                let (rx1, ry1, rx2, ry2) = (rect[0], rect[1], rect[2], rect[3]);
+                let (bx1, by1, bx2, by2) = (bbox[0], bbox[1], bbox[2], bbox[3]);
+                let bw = bx2 - bx1;
+                let bh = by2 - by1;
+                if bw.abs() < 0.01 || bh.abs() < 0.01 { continue; }
+
+                // Build transform: Rect_mapping × Appearance_Matrix
+                // Rect_mapping maps BBox → Rect: [sx 0 0 sy tx ty]
+                // If appearance has /Matrix [a b c d e f], compose: Rect_mapping × Matrix
+                let sx = (rx2 - rx1) / bw;
+                let sy = (ry2 - ry1) / bh;
+                let tx = rx1 - sx * bx1;
+                let ty = ry1 - sy * by1;
+
+                let (ma, mb, mc, md, me, mf) = if ap_matrix.len() == 6 {
+                    (ap_matrix[0], ap_matrix[1], ap_matrix[2],
+                     ap_matrix[3], ap_matrix[4], ap_matrix[5])
+                } else {
+                    (1.0, 0.0, 0.0, 1.0, 0.0, 0.0) // identity
+                };
+
+                // Compose: [sx 0 0 sy tx ty] × [ma mb mc md me mf]
+                // = [sx*ma  sx*mb  sy*mc  sy*md  sx*me+tx  sy*mf+ty]
+                let cm_a = sx * ma;
+                let cm_b = sx * mb;
+                let cm_c = sy * mc;
+                let cm_d = sy * md;
+                let cm_e = sx * me + tx;
+                let cm_f = sy * mf + ty;
+
+                // Use a unique prefix to avoid name collisions with existing XObjects
+                let annot_name = format!("__Annot{}", annot_idx);
+                annot_xobjects.push((annot_name.clone().into_bytes(), ap_xobj_id));
+
+                // Drawing command: q <composed_matrix> /AnnotN Do Q
+                annot_draw_cmds.extend_from_slice(
+                    format!("q {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm /{} Do Q\n",
+                        cm_a, cm_b, cm_c, cm_d, cm_e, cm_f, annot_name).as_bytes()
+                );
+
+                log::info!("extract_page_as_form_xobject: annotation[{}] rect=[{:.1},{:.1},{:.1},{:.1}] bbox=[{:.1},{:.1},{:.1},{:.1}]",
+                    annot_idx, rx1, ry1, rx2, ry2, bx1, by1, bx2, by2);
+            }
+
+            if !annot_xobjects.is_empty() {
+                log::info!("extract_page_as_form_xobject: processed {} annotation(s)", annot_xobjects.len());
+            }
+        }
+    }
+
+    // Append closing suffix FIRST, then annotation drawing commands.
+    // The suffix (\nQ\n) restores the graphics state, undoing any CTM
+    // transformations from the page content (e.g. "2.8346 0 0 2.8346 0 0 cm").
+    // Annotation Rect coordinates are in the BBox coordinate system, so they
+    // must be drawn AFTER the graphics state is restored — otherwise the CTM
+    // scale would push the annotations far outside the BBox bounds.
+    final_content.extend_from_slice(&suffix);
+    final_content.extend_from_slice(&annot_draw_cmds);
+
+    // Add annotation XObjects to the resources dictionary
+    if !annot_xobjects.is_empty() {
+        if let lopdf::Object::Dictionary(ref mut res_dict) = remapped_resources {
+            let xobject_dict = match res_dict.get(b"XObject") {
+                Ok(lopdf::Object::Dictionary(d)) => d.clone(),
+                Ok(lopdf::Object::Reference(id)) => {
+                    match output_doc.get_object(*id) {
+                        Ok(lopdf::Object::Dictionary(d)) => d.clone(),
+                        _ => lopdf::Dictionary::new(),
+                    }
+                }
+                _ => lopdf::Dictionary::new(),
+            };
+            let mut merged_xobject = xobject_dict;
+            for (name, id) in annot_xobjects {
+                merged_xobject.set(name, lopdf::Object::Reference(id));
+            }
+            res_dict.set(b"XObject".to_vec(), lopdf::Object::Dictionary(merged_xobject));
+        }
+    }
 
     // 7. Build Form XObject stream — BBox uses EFFECTIVE (post-rotation) dimensions.
     let mut dict = lopdf::Dictionary::new();
@@ -5893,6 +6104,400 @@ fn build_cutline_ops_lopdf(
     ops.push(Operation { operator: "Q".into(), operands: vec![] });
 
     Some(lopdf::content::Content { operations: ops })
+}
+
+#[cfg(test)]
+mod test_annotation_baking {
+    use super::*;
+    use std::collections::HashMap;
+    use lopdf::{Document, ObjectId};
+
+    #[test]
+    fn test_722_annotation_baking() {
+        let path = r"D:\test\fapiao\sample\7.22底座.pdf";
+        let source = Document::load(path).expect("加载源PDF失败");
+        let mut output = Document::new();
+        let mut id_map: HashMap<ObjectId, ObjectId> = HashMap::new();
+
+        let pages = source.get_pages();
+        let page_id = pages.get(&1).copied().expect("页面1不存在");
+
+        let result = extract_page_as_form_xobject(
+            &source, page_id, &mut output, &mut id_map,
+        );
+
+        match result {
+            Ok((xobj_id, w, h)) => {
+                println!("Form XObject: id={:?}, size={:.1}x{:.1}", xobj_id, w, h);
+
+                if let Ok(obj) = output.get_object(xobj_id) {
+                    if let lopdf::Object::Stream(s) = obj {
+                        let content = &s.content;
+                        let content_str = String::from_utf8_lossy(content);
+
+                        let has_annot0 = content_str.contains("/__Annot0");
+                        let has_annot1 = content_str.contains("/__Annot1");
+                        println!("Has /__Annot0 Do: {}", has_annot0);
+                        println!("Has /__Annot1 Do: {}", has_annot1);
+
+                        // Check Resources
+                        if let Ok(lopdf::Object::Dictionary(res_dict)) = s.dict.get(b"Resources") {
+                            if let Ok(lopdf::Object::Dictionary(xdict)) = res_dict.get(b"XObject") {
+                                let annot_names: Vec<String> = xdict.iter()
+                                    .filter(|(k, _)| String::from_utf8_lossy(k).starts_with("__Annot"))
+                                    .map(|(k, v)| format!("{}={:?}", String::from_utf8_lossy(k), v))
+                                    .collect();
+                                println!("Annotation XObjects in Resources: {:?}", annot_names);
+
+                                // Verify each annotation XObject is a valid Form XObject
+                                for (name, val) in xdict.iter() {
+                                    let name_str = String::from_utf8_lossy(name);
+                                    if name_str.starts_with("__Annot") {
+                                        if let lopdf::Object::Reference(ref_id) = val {
+                                            if let Ok(annot_obj) = output.get_object(*ref_id) {
+                                                match annot_obj {
+                                                    lopdf::Object::Stream(annot_s) => {
+                                                        let has_bbox = annot_s.dict.get(b"BBox").is_ok();
+                                                        let has_resources = annot_s.dict.get(b"Resources").is_ok();
+                                                        println!("  {} → valid Form XObject: HasBBox={}, HasResources={}",
+                                                            name_str, has_bbox, has_resources);
+
+                                                        // Check if resources have been properly remapped
+                                                        if let Ok(lopdf::Object::Dictionary(annot_res)) = annot_s.dict.get(b"Resources") {
+                                                            if let Ok(lopdf::Object::Dictionary(annot_xobj)) = annot_res.get(b"XObject") {
+                                                                for (xn, xv) in annot_xobj.iter() {
+                                                                    println!("    XObject/{} = {:?}", String::from_utf8_lossy(xn), xv);
+                                                                    // Verify the referenced object exists in output
+                                                                    if let lopdf::Object::Reference(xref) = xv {
+                                                                        let exists = output.get_object(*xref).is_ok();
+                                                                        println!("      → exists in output: {}", exists);
+                                                                    }
+                                                                }
+                                                            }
+                                                            if let Ok(lopdf::Object::Dictionary(annot_egs)) = annot_res.get(b"ExtGState") {
+                                                                for (gn, gv) in annot_egs.iter() {
+                                                                    println!("    ExtGState/{} = {:?}", String::from_utf8_lossy(gn), gv);
+                                                                    if let lopdf::Object::Reference(gref) = gv {
+                                                                        let exists = output.get_object(*gref).is_ok();
+                                                                        println!("      → exists in output: {}", exists);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => println!("  {} → NOT a stream!", name_str),
+                                                }
+                                            } else {
+                                                println!("  {} → object NOT found in output!", name_str);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("No /XObject in Resources!");
+                            }
+                        }
+
+                        // Print last part of content stream
+                        if content.len() > 300 {
+                            println!("\nLast 300 bytes of content:\n{}", String::from_utf8_lossy(&content[content.len()-300..]));
+                        }
+
+                        assert!(has_annot0, "Annotation 0 (__Annot0) should be in content stream");
+                        assert!(has_annot1, "Annotation 1 (__Annot1) should be in content stream");
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("extract_page_as_form_xobject FAILED: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_320101_annotation_baking() {
+        let path = r"D:\test\fapiao\sample\320101260009390772.pdf";
+        let source = Document::load(path).expect("加载源PDF失败");
+        let mut output = Document::new();
+        let mut id_map: HashMap<ObjectId, ObjectId> = HashMap::new();
+
+        let pages = source.get_pages();
+        let page_id = pages.get(&1).copied().expect("页面1不存在");
+
+        let result = extract_page_as_form_xobject(
+            &source, page_id, &mut output, &mut id_map,
+        );
+
+        match result {
+            Ok((xobj_id, w, h)) => {
+                println!("Form XObject: id={:?}, size={:.1}x{:.1}", xobj_id, w, h);
+
+                if let Ok(obj) = output.get_object(xobj_id) {
+                    if let lopdf::Object::Stream(s) = obj {
+                        let content_str = String::from_utf8_lossy(&s.content);
+                        let has_annot0 = content_str.contains("/__Annot0");
+                        println!("Has /__Annot0 Do: {}", has_annot0);
+
+                        if let Ok(lopdf::Object::Dictionary(res_dict)) = s.dict.get(b"Resources") {
+                            if let Ok(lopdf::Object::Dictionary(xdict)) = res_dict.get(b"XObject") {
+                                let annot_names: Vec<String> = xdict.iter()
+                                    .filter(|(k, _)| String::from_utf8_lossy(k).starts_with("__Annot"))
+                                    .map(|(k, v)| format!("{}={:?}", String::from_utf8_lossy(k), v))
+                                    .collect();
+                                println!("Annotation XObjects: {:?}", annot_names);
+                            }
+                        }
+
+                        assert!(has_annot0, "Annotation 0 (__Annot0) should be in content stream");
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("extract_page_as_form_xobject FAILED: {}", e);
+            }
+        }
+    }
+
+    /// Generate a complete PDF with annotation baked in, save to disk for visual verification
+    #[test]
+    fn test_722_full_pdf_generation() {
+        let path = r"D:\test\fapiao\sample\7.22底座.pdf";
+        let source = Document::load(path).expect("加载源PDF失败");
+        let mut output = Document::new();
+        let mut id_map: HashMap<ObjectId, ObjectId> = HashMap::new();
+
+        let pages = source.get_pages();
+        let page_id = pages.get(&1).copied().expect("页面1不存在");
+
+        let (xobj_id, w, h) = extract_page_as_form_xobject(
+            &source, page_id, &mut output, &mut id_map,
+        ).expect("extract_page_as_form_xobject failed");
+
+        // Build a complete PDF with one page containing the Form XObject
+        let xobj_name = b"Fm0";
+
+        // Page content: draw the Form XObject centered on A4
+        let page_w = 595.276;
+        let page_h = 396.85;  // Same as source page
+        let content_str = format!("q {} 0 0 {} 0 0 cm /Fm0 Do Q\n", page_w / w, page_h / h);
+        let content_stream = lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            content_str.into_bytes(),
+        ).with_compression(true);
+        let content_id = output.add_object(lopdf::Object::Stream(content_stream));
+
+        // Resources with the Form XObject
+        let mut resources = lopdf::Dictionary::new();
+        let mut xobject_dict = lopdf::Dictionary::new();
+        xobject_dict.set(xobj_name.to_vec(), lopdf::Object::Reference(xobj_id));
+        resources.set(b"XObject".to_vec(), lopdf::Object::Dictionary(xobject_dict));
+
+        // Page dictionary
+        let mut page_dict = lopdf::Dictionary::new();
+        page_dict.set("Type", lopdf::Object::Name(b"Page".to_vec()));
+        page_dict.set("MediaBox", lopdf::Object::Array(vec![
+            lopdf::Object::Real(0.0), lopdf::Object::Real(0.0),
+            lopdf::Object::Real(page_w), lopdf::Object::Real(page_h),
+        ]));
+        page_dict.set("Contents", lopdf::Object::Reference(content_id));
+        page_dict.set("Resources", lopdf::Object::Dictionary(resources));
+        let page_id_out = output.add_object(lopdf::Object::Dictionary(page_dict));
+
+        // Pages tree
+        let pages_dict = lopdf::Dictionary::from_iter(vec![
+            ("Type", lopdf::Object::Name(b"Pages".to_vec())),
+            ("Count", lopdf::Object::Integer(1)),
+            ("Kids", lopdf::Object::Array(vec![lopdf::Object::Reference(page_id_out)])),
+        ]);
+        let pages_id = output.add_object(lopdf::Object::Dictionary(pages_dict));
+
+        // Update page parent
+        if let Ok(lopdf::Object::Dictionary(ref mut pd)) = output.get_object_mut(page_id_out) {
+            pd.set("Parent", lopdf::Object::Reference(pages_id));
+        }
+
+        // Catalog
+        let catalog_id = output.add_object(lopdf::Dictionary::from_iter(vec![
+            ("Type", lopdf::Object::Name(b"Catalog".to_vec())),
+            ("Pages", lopdf::Object::Reference(pages_id)),
+        ]));
+        output.trailer.set("Root", lopdf::Object::Reference(catalog_id));
+
+        // Save to disk
+        let output_path = r"D:\test\fapiao\sample\test_722_output.pdf";
+        output.save(output_path).expect("保存PDF失败");
+        println!("Generated PDF saved to: {}", output_path);
+
+        // Verify the saved PDF contains annotation references
+        let saved = Document::load(output_path).expect("加载生成的PDF失败");
+        let saved_pages = saved.get_pages();
+        let saved_page_id = saved_pages.get(&1).copied().expect("页面1不存在");
+
+        // Check page content for /Fm0 Do
+        if let Ok(content) = saved.get_page_content(saved_page_id) {
+            let content_str = String::from_utf8_lossy(&content);
+            let has_fm0 = content_str.contains("/Fm0 Do");
+            println!("Page content has /Fm0 Do: {}", has_fm0);
+        }
+
+        // Check the Form XObject content for annotation references
+        // Find the Form XObject by looking for __Annot in any stream
+        let mut found_annot = false;
+        for (_, obj) in saved.objects.iter() {
+            if let lopdf::Object::Stream(s) = obj {
+                let content_str = String::from_utf8_lossy(&s.content);
+                if content_str.contains("/__Annot0 Do") {
+                    found_annot = true;
+                    println!("Found /__Annot0 Do in Form XObject content!");
+                    // Print last part
+                    if content_str.len() > 200 {
+                        println!("Last 200 chars:\n{}", &content_str[content_str.len()-200..]);
+                    }
+                }
+            }
+        }
+        assert!(found_annot, "Generated PDF should contain /__Annot0 Do");
+    }
+
+    /// End-to-end test: simulate the full generate_pdf_passthrough flow
+    /// for 7.22底座.pdf, then verify the output PDF renders correctly
+    /// (annotations visible) using PyMuPDF-style structural checks.
+    #[test]
+    fn test_722_e2e_passthrough() {
+        let source_path = r"D:\test\fapiao\sample\7.22底座.pdf";
+        let output_path = r"D:\test\fapiao\sample\test_722_e2e_output.pdf";
+
+        let source = Document::load(source_path).expect("加载源PDF失败");
+        let mut output_doc = Document::with_version("1.4");
+
+        // Simulate generate_pdf_passthrough flow
+        let mut id_map: HashMap<ObjectId, ObjectId> = HashMap::new();
+
+        let pages = source.get_pages();
+        let source_page_id = pages.get(&1).copied().expect("页面1不存在");
+
+        // Step 1: Extract page as Form XObject (with annotation baking)
+        let (xobj_id, src_w, src_h) = extract_page_as_form_xobject(
+            &source, source_page_id, &mut output_doc, &mut id_map,
+        ).expect("extract_page_as_form_xobject failed");
+
+        println!("Form XObject: id={:?}, size={:.1}x{:.1}", xobj_id, src_w, src_h);
+
+        // Step 2: Build page content stream (1-up layout, 1:1 scale — same as build_nup_content_stream
+        // when slot size matches source page size: sx = draw_w/src_w = 1.0, sy = draw_h/src_h = 1.0)
+        let xobj_name = b"Fm0";
+        let content_str = format!("q 1 0 0 1 0 0 cm /Fm0 Do Q\n");
+        let content_stream = lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            content_str.into_bytes(),
+        ).with_compression(true);
+        let content_id = output_doc.add_object(lopdf::Object::Stream(content_stream));
+
+        // Step 3: Build Resources
+        let mut resources = lopdf::Dictionary::new();
+        let mut xobject_dict = lopdf::Dictionary::new();
+        xobject_dict.set(xobj_name.to_vec(), lopdf::Object::Reference(xobj_id));
+        resources.set(b"XObject".to_vec(), lopdf::Object::Dictionary(xobject_dict));
+
+        // Step 4: Build Page dictionary
+        let mut page_dict = lopdf::Dictionary::new();
+        page_dict.set("Type", lopdf::Object::Name(b"Page".to_vec()));
+        page_dict.set("MediaBox", lopdf::Object::Array(vec![
+            lopdf::Object::Real(0.0), lopdf::Object::Real(0.0),
+            lopdf::Object::Real(src_w), lopdf::Object::Real(src_h),
+        ]));
+        page_dict.set("Contents", lopdf::Object::Reference(content_id));
+        page_dict.set("Resources", lopdf::Object::Dictionary(resources));
+        let page_id_out = output_doc.add_object(lopdf::Object::Dictionary(page_dict));
+
+        // Step 5: Build Pages tree
+        let pages_dict = lopdf::Dictionary::from_iter(vec![
+            ("Type", lopdf::Object::Name(b"Pages".to_vec())),
+            ("Count", lopdf::Object::Integer(1)),
+            ("Kids", lopdf::Object::Array(vec![lopdf::Object::Reference(page_id_out)])),
+        ]);
+        let pages_id = output_doc.add_object(lopdf::Object::Dictionary(pages_dict));
+
+        // Update page parent
+        if let Ok(lopdf::Object::Dictionary(ref mut pd)) = output_doc.get_object_mut(page_id_out) {
+            pd.set("Parent", lopdf::Object::Reference(pages_id));
+        }
+
+        // Step 6: Build Catalog
+        let catalog_id = output_doc.add_object(lopdf::Dictionary::from_iter(vec![
+            ("Type", lopdf::Object::Name(b"Catalog".to_vec())),
+            ("Pages", lopdf::Object::Reference(pages_id)),
+        ]));
+        output_doc.trailer.set("Root", lopdf::Object::Reference(catalog_id));
+
+        // Step 7: Save (same as generate_pdf_passthrough)
+        let mut pdf_buf = Vec::new();
+        output_doc.save_to(&mut pdf_buf).expect("PDF保存失败");
+        std::fs::write(output_path, &pdf_buf).expect("写入文件失败");
+        println!("E2E PDF saved to: {} ({} bytes)", output_path, pdf_buf.len());
+
+        // Step 8: Verify the saved PDF
+        let saved = Document::load(output_path).expect("加载生成的PDF失败");
+        let saved_pages = saved.get_pages();
+        let saved_page_id = saved_pages.get(&1).copied().expect("页面1不存在");
+
+        // Check page content for /Fm0 Do
+        if let Ok(content) = saved.get_page_content(saved_page_id) {
+            let content_str = String::from_utf8_lossy(&content);
+            assert!(content_str.contains("/Fm0 Do"), "Page content should contain /Fm0 Do");
+            println!("Page content OK: contains /Fm0 Do");
+        }
+
+        // Check Form XObject content for annotation references
+        let mut found_annot0 = false;
+        let mut found_annot1 = false;
+        let mut annot_xobj_count = 0;
+        for (obj_id, obj) in saved.objects.iter() {
+            if let lopdf::Object::Stream(s) = obj {
+                // Try both decompressed and raw content
+                let content_str = match s.decompressed_content() {
+                    Ok(c) => String::from_utf8_lossy(&c).to_string(),
+                    Err(_) => String::from_utf8_lossy(&s.content).to_string(),
+                };
+                if content_str.contains("/__Annot0 Do") {
+                    found_annot0 = true;
+                    println!("Found /__Annot0 Do in obj {:?}", obj_id);
+                }
+                if content_str.contains("/__Annot1 Do") {
+                    found_annot1 = true;
+                    println!("Found /__Annot1 Do in obj {:?}", obj_id);
+                }
+                // Also check raw content
+                let raw_str = String::from_utf8_lossy(&s.content);
+                if raw_str.contains("__Annot") && !content_str.contains("__Annot") {
+                    println!("WARNING: obj {:?} has __Annot in raw content but NOT in decompressed!", obj_id);
+                    println!("  Raw last 200: {}", &raw_str[raw_str.len().saturating_sub(200)..]);
+                    println!("  Decompressed last 200: {}", &content_str[content_str.len().saturating_sub(200)..]);
+                }
+                // Check for annotation Form XObjects
+                if let Ok(lopdf::Object::Name(subtype)) = s.dict.get(b"Subtype") {
+                    if subtype == b"Form" {
+                        if let Ok(lopdf::Object::Dictionary(res)) = s.dict.get(b"Resources") {
+                            if let Ok(lopdf::Object::Dictionary(xdict)) = res.get(b"XObject") {
+                                for (name, _) in xdict.iter() {
+                                    let name_str = String::from_utf8_lossy(name);
+                                    if name_str.starts_with("__Annot") {
+                                        annot_xobj_count += 1;
+                                        println!("Found annotation XObject: {}", name_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(found_annot0, "Generated PDF should contain /__Annot0 Do in Form XObject");
+        assert!(found_annot1, "Generated PDF should contain /__Annot1 Do in Form XObject");
+        assert!(annot_xobj_count >= 2, "Should have at least 2 annotation XObjects, found {}", annot_xobj_count);
+        println!("E2E test PASSED: annotations are properly baked into the PDF");
+    }
 }
 
 /// Draw borders around each invoice's visual boundary (follows per-slot adjustments).
