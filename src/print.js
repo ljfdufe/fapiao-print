@@ -61,9 +61,9 @@ function buildLayoutRequest(files, settings) {
 
   function getFileIndex(fileObj) {
     if (!fileObj) return null;
-    // Use _filePath as dedup key when available (more stable than previewUrl),
-    // otherwise fall back to previewUrl
-    var key = fileObj._filePath || fileObj.previewUrl || '';
+    // Use _filePath as dedup key when available (more stable than previewUrl).
+    // For OFD, fall back to previewUrl since _filePath is shared across pages.
+    var key = (fileObj.type !== 'ofd' && fileObj._filePath) ? fileObj._filePath : (fileObj.previewUrl || '');
     if (!key) return null;
     if (!(key in fileMap)) {
       fileMap[key] = fileSpecs.length;
@@ -72,17 +72,24 @@ function buildLayoutRequest(files, settings) {
         oh: fileObj.oh || 0,
         rotation: fileObj.rotation || 0,
       };
-      // If the file has a disk path, pass it so Rust can read directly
-      // (skip base64 overhead). Otherwise, pass the base64 dataUrl.
-      if (fileObj._filePath) {
+      // Determine source type and path strategy
+      // PDF pages have _pdfPath; OFD pages have type='ofd' even with _filePath
+      if (fileObj._pdfPath) {
+        spec.sourceType = 'pdf-page';
+        spec.dataUrl = fileObj.previewUrl || '';
+        spec.filePath = null;
+      } else if (fileObj.type === 'ofd') {
+        spec.sourceType = 'ofd-page';
+        spec.dataUrl = fileObj.previewUrl || '';
+        spec.filePath = null;
+      } else if (fileObj._filePath) {
         spec.filePath = fileObj._filePath;
         spec.dataUrl = ''; // not needed — Rust reads from file
         spec.sourceType = 'image';
       } else {
         spec.dataUrl = fileObj.previewUrl || '';
         spec.filePath = null;
-        // PDF pages have _pdfPath; OFD pages don't
-        spec.sourceType = fileObj._pdfPath ? 'pdf-page' : 'ofd-page';
+        spec.sourceType = 'image';
       }
       // Pass PDF source info for passthrough optimization
       if (fileObj._pdfPath) {

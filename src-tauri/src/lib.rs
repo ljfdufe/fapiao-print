@@ -221,6 +221,57 @@ fn copy_file(src_path: String, dest_path: String) -> Result<serde_json::Value, S
     }))
 }
 
+/// Rename/move a file from srcPath to destPath.
+/// Tries atomic fs::rename first; falls back to copy+delete on cross-device errors.
+/// Creates parent directories for the destination if they don't exist.
+/// Will NOT overwrite an existing destination file.
+#[command]
+async fn rename_file(src_path: String, dest_path: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let src = std::path::Path::new(&src_path);
+        if !src.exists() {
+            return Err(format!("源文件不存在: {}", src_path));
+        }
+        let dest = std::path::Path::new(&dest_path);
+        if dest.exists() {
+            return Err(format!("目标文件已存在: {}", dest_path));
+        }
+        if let Some(parent) = dest.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("无法创建目标目录 '{}': {}", parent.display(), e))?;
+            }
+        }
+        // Try atomic rename first (same device)
+        match std::fs::rename(src, dest) {
+            Ok(()) => {}
+            Err(e) => {
+                // On cross-device error, fall back to copy + delete
+                if e.raw_os_error() == Some(17) {
+                    // ERROR_NOT_SAME_DEVICE on Windows
+                    let size = std::fs::copy(src, dest)
+                        .map_err(|e2| format!("跨盘符复制失败 {} → {}: {}", src_path, dest_path, e2))?;
+                    std::fs::remove_file(src)
+                        .map_err(|e2| format!("删除源文件失败 {}: {}", src_path, e2))?;
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "srcPath": src_path,
+                        "destPath": dest_path,
+                        "size": size,
+                        "fallback": "copy_delete"
+                    }));
+                }
+                return Err(format!("重命名失败 {} → {}: {}", src_path, dest_path, e));
+            }
+        }
+        Ok(serde_json::json!({
+            "success": true,
+            "srcPath": src_path,
+            "destPath": dest_path
+        }))
+    }).await.map_err(|e| format!("任务执行失败: {}", e))?
+}
+
 /// Write UTF-8 text content to a file (creates parent dirs if needed).
 /// Used by the CSV summary export feature.
 #[command]
@@ -1225,6 +1276,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        rename_file,
         write_text_file,
         check_path_exists,
         get_downloads_dir,
@@ -1262,6 +1314,7 @@ pub fn run() {
         open_url,
         open_file,
         copy_file,
+        rename_file,
         write_text_file,
         check_path_exists,
         get_downloads_dir,
