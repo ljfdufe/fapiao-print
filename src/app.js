@@ -1,5 +1,5 @@
 // =====================================================
-// 发票批量打印工具 — 主入口
+// 发票酱 — 主入口
 // v1.10.5 — 预览加速 + 批量加载 + 智能缓存 + IPC 异步化
 // =====================================================
 
@@ -307,7 +307,7 @@ function showSumatraDownloadError(errMsg) {
 
 function switchToPdfMode() {
   document.getElementById('printMode').value = 'pdf';
-  try { localStorage.setItem('fapiao-print-mode', 'pdf'); } catch(e) {}
+  try { localStorage.setItem('ticketchan-print-mode', 'pdf'); } catch(e) {}
   var modal1 = document.getElementById('sumatraPdfModal');
   if (modal1) modal1.classList.add('hidden');
   var modal2 = document.getElementById('pdfiumModal');
@@ -2263,12 +2263,12 @@ function saveSettings() {
   var notesMap = {};
   S.files.forEach(function(f) { if (f.note && f.name) notesMap[f.name] = f.note; });
   if (Object.keys(notesMap).length > 0) o.summaryNotes = notesMap;
-  try { localStorage.setItem('fapiao-settings', JSON.stringify(o)); } catch(e) {}
+  try { localStorage.setItem('ticketchan-settings', JSON.stringify(o)); } catch(e) {}
 }
 
 function loadSettings() {
   var raw;
-  try { raw = localStorage.getItem('fapiao-settings'); } catch(e) { return; }
+  try { raw = localStorage.getItem('ticketchan-settings'); } catch(e) { return; }
   if (!raw) return;
   var o;
   try { o = JSON.parse(raw); } catch(e) { return; }
@@ -2365,23 +2365,23 @@ function togglePref(k, btn) {
   S.feat[k] = !S.feat[k];
   btn.classList.toggle('on', S.feat[k]);
   if (k === 'ocrEnabled') {
-    try { localStorage.setItem('fapiao-ocr-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
+    try { localStorage.setItem('ticketchan-ocr-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
   }
   if (k === 'pdfTextEnabled') {
-    try { localStorage.setItem('fapiao-pdf-text-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
+    try { localStorage.setItem('ticketchan-pdf-text-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
   }
 }
 
 function setOcrPrecision(val) {
   S.ocrPrecision = val;
-  try { localStorage.setItem('fapiao-ocr-precision', val); } catch(e) {}
+  try { localStorage.setItem('ticketchan-ocr-precision', val); } catch(e) {}
 }
 
 function getSaveDir() {
-  try { return localStorage.getItem('fapiao-save-dir') || ''; } catch(e) { return ''; }
+  try { return localStorage.getItem('ticketchan-save-dir') || ''; } catch(e) { return ''; }
 }
 function setSaveDir(dir) {
-  try { localStorage.setItem('fapiao-save-dir', dir); } catch(e) {}
+  try { localStorage.setItem('ticketchan-save-dir', dir); } catch(e) {}
   document.getElementById('saveDir').value = dir;
 }
 async function pickSaveDir() {
@@ -2412,14 +2412,14 @@ function applyTheme() {
   var theme = document.getElementById('themeMode').value;
   if (theme === 'dark') { document.documentElement.classList.add('dark'); }
   else { document.documentElement.classList.remove('dark'); }
-  try { localStorage.setItem('fapiao-theme', theme); } catch(e) {}
+  try { localStorage.setItem('ticketchan-theme', theme); } catch(e) {}
 }
 
 function exportSettings() {
   var data = { layout: S.layout, feat: S.feat, ocrPrecision: S.ocrPrecision, paperSize: document.getElementById('paperSize').value, orientation: document.getElementById('orientation').value, copies: document.getElementById('copies').value, colorMode: document.getElementById('colorMode').value, printMode: document.getElementById('printMode').value, saveDir: getSaveDir() };
   var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = '发票打印设置.json'; a.click();
+  a.download = '发票酱设置.json'; a.click();
   toast('设置已导出');
 }
 
@@ -2470,13 +2470,13 @@ function resetSettings() {
   document.getElementById('printMode').value = 'pdf';
   document.getElementById('themeMode').value = 'light';
   document.documentElement.classList.remove('dark');
-  try { localStorage.removeItem('fapiao-theme'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-save-dir'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-amt-mode'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-ocr-enabled'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-ocr-precision'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-pdf-text-enabled'); } catch(e) {}
-  try { localStorage.removeItem('fapiao-settings'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-theme'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-save-dir'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-amt-mode'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-ocr-enabled'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-ocr-precision'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-pdf-text-enabled'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-settings'); } catch(e) {}
   document.getElementById('saveDir').value = '';
   document.getElementById('amtMode').value = 'tax';
   S.amtMode = 'tax';
@@ -2628,7 +2628,7 @@ if (isTauri && invoke) {
 // =====================================================
 (function() {
   try {
-    var saved = localStorage.getItem('fapiao-theme');
+    var saved = localStorage.getItem('ticketchan-theme');
     if (saved === 'dark') {
       document.getElementById('themeMode').value = 'dark';
       document.documentElement.classList.add('dark');
@@ -2640,14 +2640,14 @@ document.getElementById('orientation').value = 'landscape';
 
 (function() {
   try {
-    var dir = localStorage.getItem('fapiao-save-dir') || '';
+    var dir = localStorage.getItem('ticketchan-save-dir') || '';
     document.getElementById('saveDir').value = dir;
   } catch(e) {}
 })();
 
 (function() {
   try {
-    var m = localStorage.getItem('fapiao-amt-mode');
+    var m = localStorage.getItem('ticketchan-amt-mode');
     if (m && (m === 'tax' || m === 'notax' || m === 'both')) {
       S.amtMode = m;
       document.getElementById('amtMode').value = m;
@@ -2657,7 +2657,7 @@ document.getElementById('orientation').value = 'landscape';
 
 (function() {
   try {
-    var pm = localStorage.getItem('fapiao-print-mode');
+    var pm = localStorage.getItem('ticketchan-print-mode');
     if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdfium' || pm === 'pdf')) {
       document.getElementById('printMode').value = pm;
     } else {
@@ -2669,7 +2669,7 @@ document.getElementById('orientation').value = 'landscape';
 // Restore OCR enabled setting
 (function() {
   try {
-    var v = localStorage.getItem('fapiao-ocr-enabled');
+    var v = localStorage.getItem('ticketchan-ocr-enabled');
     if (v === '1') {
       S.feat.ocrEnabled = true;
       document.getElementById('toggleOcrEnabled').classList.add('on');
@@ -2680,7 +2680,7 @@ document.getElementById('orientation').value = 'landscape';
 // Restore PDF text extraction setting
 (function() {
   try {
-    var v = localStorage.getItem('fapiao-pdf-text-enabled');
+    var v = localStorage.getItem('ticketchan-pdf-text-enabled');
     var btn = document.getElementById('togglePdfText');
     if (v === '0') {
       S.feat.pdfTextEnabled = false;
@@ -2695,7 +2695,7 @@ document.getElementById('orientation').value = 'landscape';
 // Restore OCR precision setting
 (function() {
   try {
-    var p = localStorage.getItem('fapiao-ocr-precision');
+    var p = localStorage.getItem('ticketchan-ocr-precision');
     if (p && (p === 'fast' || p === 'standard' || p === 'precise')) {
       S.ocrPrecision = p;
       document.getElementById('ocrPrecision').value = p;
@@ -2739,7 +2739,7 @@ loadSettings();
         APP_VERSION = v;
         var el = document.getElementById('stVersion');
         if (el) el.textContent = 'v' + v;
-        console.log('发票批量打印 v' + v + ' | isTauri:', isTauri);
+        console.log('发票酱 v' + v + ' | isTauri:', isTauri);
       }).catch(function() {});
       try { invoke('show_window'); } catch(e) {}
     } else {
@@ -3046,7 +3046,7 @@ async function exportSummaryCsv() {
       try { await invoke('open_file', { path: dirPath }); } catch(e) {}
       toast('已保存: ' + savePath);
       // Update saveDir for future use
-      if (dirPath) localStorage.setItem('fapiao-save-dir', dirPath);
+      if (dirPath) localStorage.setItem('ticketchan-save-dir', dirPath);
     } catch(e) {
       toast('导出失败: ' + e);
     }

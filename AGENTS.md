@@ -1,4 +1,4 @@
-# 电子发票批量打印工具 — Agent 指南
+# 发票酱 — Agent 指南
 
 ## 项目概览
 
@@ -135,7 +135,7 @@ Rust `extract_pdf_text()` 解析 lopdf content stream，前端 `applyPdfTextResu
 
 关闭软件后自动记住用户设置，下次打开自动恢复。
 
-- **统一入口**: `saveSettings()` / `loadSettings()` — `fapiao-settings` JSON 存储
+- **统一入口**: `saveSettings()` / `loadSettings()` — `ticketchan-settings` JSON 存储
 - **覆盖范围**: 排版布局、纸张、边距、缩放、旋转、份数、颜色、打印模式、辅助开关、水印、页脚、下边距
 - **防抖保存**: `updatePreview()` 500ms 防抖自动触发 `saveSettings()`
 - **恢复默认**: 清除所有持久化数据
@@ -247,7 +247,7 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 **可编辑预览 + CSV 导出**，用于报销时生成发票明细汇总表。
 
 - **入口**: 侧边栏左下角金额汇总旁 📊 按钮
-- **弹窗**: 14 个字段按需勾选（全选/取消全选），列选择和备注持久化到 `fapiao-settings`
+- **弹窗**: 14 个字段按需勾选（全选/取消全选），列选择和备注持久化到 `ticketchan-settings`
 - **编辑**: 金额/文本双击编辑，`setSummaryCellValue()` 回写 `fileObj`，自动触发 `renderFileList()` + `updateAmountSummary()` + `updatePreview()` 全 UI 同步
 - **合计**: 三种金额（含税/不含税/税额）分别汇总，合计行 `position:sticky;bottom:0` 始终可见
 - **导出**: `exportSummaryCsv()` — UTF-8 BOM + CRLF，CSV 纯手写零依赖，`write_text_file` (async+spawn_blocking) 写入磁盘，导出后 `open_file` 打开文件夹

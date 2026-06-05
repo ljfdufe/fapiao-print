@@ -33,7 +33,7 @@ jobs:
           $OutputEncoding = [System.Text.Encoding]::UTF8
           # 验证
           Write-Host "代码页: $(chcp)"
-          Write-Host "测试中文输出: 发票打印工具"
+          Write-Host "测试中文输出: 发票酱"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -73,10 +73,10 @@ jobs:
           Write-Host "`n=== 验证构建产物 ==="
           $dist = "dist"
           $expected = @(
-            "发票打印工具_*_x64-setup.exe",
-            "发票打印工具_*_x64_绿色版.exe",
-            "发票打印工具_*_x64_OCR版-setup.exe",
-            "发票打印工具_*_x64_OCR绿色版.zip"
+            "发票酱_*_x64-setup.exe",
+            "发票酱_*_x64_绿色版.exe",
+            "发票酱_*_x64_OCR版-setup.exe",
+            "发票酱_*_x64_OCR绿色版.zip"
           )
           $files = Get-ChildItem -Path $dist -File
           if ($files.Count -ne 4) {
@@ -98,9 +98,9 @@ jobs:
 
           $renameMap = @{
             # 模式: 不含中文的文件名 → 正确的中文名
-            "_${version}_x64-setup.exe"                = "发票打印工具_${version}_x64-setup.exe"
-            "_${version}_x64_OCR.-setup.exe"           = "发票打印工具_${version}_x64_OCR版-setup.exe"
-            "_${version}_x64_OCR-setup.exe"            = "发票打印工具_${version}_x64_OCR版-setup.exe"
+            "_${version}_x64-setup.exe"                = "发票酱_${version}_x64-setup.exe"
+            "_${version}_x64_OCR.-setup.exe"           = "发票酱_${version}_x64_OCR版-setup.exe"
+            "_${version}_x64_OCR-setup.exe"            = "发票酱_${version}_x64_OCR版-setup.exe"
           }
 
           foreach ($entry in $renameMap.GetEnumerator()) {
@@ -114,8 +114,8 @@ jobs:
 
           # 检查绿色便携版文件名（轻量版=exe, OCR版=zip）
           $zipRenameMap = @{
-            "_${version}_x64_.exe"                     = "发票打印工具_${version}_x64_绿色版.exe"
-            "_${version}_x64_OCR.zip"                  = "发票打印工具_${version}_x64_OCR绿色版.zip"
+            "_${version}_x64_.exe"                     = "发票酱_${version}_x64_绿色版.exe"
+            "_${version}_x64_OCR.zip"                  = "发票酱_${version}_x64_OCR绿色版.zip"
           }
 
           foreach ($entry in $zipRenameMap.GetEnumerator()) {

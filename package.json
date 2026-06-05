@@ -1,7 +1,7 @@
 {
-  "name": "fapiao-print",
+  "name": "ticketchan",
   "version": "2.0.6",
-  "description": "电子发票批量打印工具 - Tauri 桌面应用",
+  "description": "发票酱 - Tauri 桌面应用",
   "scripts": {
     "dev": "tauri dev",
     "dev:ocr": "tauri dev --features ocr",

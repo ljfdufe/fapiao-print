@@ -311,7 +311,7 @@ async function doSumatraPrint(files, s) {
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
       var tempDir = await invoke('get_temp_dir');
-      var outputPath = tempDir + '\\fapiao_print_output.pdf';
+      var outputPath = tempDir + '\\ticketchan_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
         request: currentRequest,
         outputPath: outputPath,
@@ -472,7 +472,7 @@ async function doPdfReaderPrint(files, s) {
     if (isTauri && invoke) {
       document.getElementById('loadingText').textContent = '正在生成PDF，请稍候...';
       var tempDir = await invoke('get_temp_dir');
-      var outputPath = tempDir + '\\fapiao_print_output.pdf';
+      var outputPath = tempDir + '\\ticketchan_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
         outputPath: outputPath,
@@ -530,7 +530,7 @@ async function savePdf() {
     try {
       var now = new Date();
       var ts = now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0') + '_' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0') + String(now.getSeconds()).padStart(2, '0');
-      var defaultName = '发票打印_' + ts + '.pdf';
+      var defaultName = '发票酱_' + ts + '.pdf';
       // Validate savedDir exists before using it (os error 3 if deleted/moved)
       var dirExists = false;
       if (savedDir) {
@@ -611,7 +611,7 @@ async function savePdf() {
       document.getElementById('loadingText').textContent = '正在生成PDF...';
       // 先在临时目录生成，作为缓存
       var tempDir = await invoke('get_temp_dir');
-      var tempPath = tempDir + '\\fapiao_print_output.pdf';
+      var tempPath = tempDir + '\\ticketchan_print_output.pdf';
       var result = await invoke('generate_pdf_from_layout', {
         request: layoutReq,
         outputPath: tempPath,
@@ -660,7 +660,7 @@ function fallbackPrint(files, s) {
   if (!w) { alert('弹出窗口被阻止'); return; }
   var pages = buildPages(files, s);
   var expanded = s.collate ? Array(s.copies).fill(pages).flat() : pages.flatMap(function(p) { return Array(s.copies).fill(p); });
-  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>发票打印</title><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:' + s.paperW + 'mm ' + s.paperH + 'mm;margin:0}body{background:white}.page{width:' + s.paperW + 'mm;height:' + s.paperH + 'mm;position:relative;page-break-after:always;background:white;overflow:hidden}.slot{position:absolute;overflow:hidden;display:flex;align-items:center;justify-content:center}.slot img{max-width:100%;max-height:100%;object-fit:contain}';
+  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>发票酱</title><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:' + s.paperW + 'mm ' + s.paperH + 'mm;margin:0}body{background:white}.page{width:' + s.paperW + 'mm;height:' + s.paperH + 'mm;position:relative;page-break-after:always;background:white;overflow:hidden}.slot{position:absolute;overflow:hidden;display:flex;align-items:center;justify-content:center}.slot img{max-width:100%;max-height:100%;object-fit:contain}';
   // Add cut line styles if enabled
   if (s.cutline) {
     html += '.cutline-v{position:absolute;top:0;bottom:0;width:0;border-right:1px dashed #ccc}.cutline-h{position:absolute;left:0;right:0;height:0;border-bottom:1px dashed #ccc}';

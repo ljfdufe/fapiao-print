@@ -66,7 +66,7 @@ fn show_error_dialog(message: &str) {
         let _ = MessageBoxW(
             None,
             &HSTRING::from(message),
-            &HSTRING::from("电子发票打印工具 - 系统不兼容"),
+            &HSTRING::from("发票酱 - 系统不兼容"),
             MB_ICONERROR | MB_OK,
         );
     }
@@ -651,7 +651,7 @@ async fn pdfium_vector_print(
         }));
     });
 
-    let temp_dir = std::env::temp_dir().join("fapiao_pdfium");
+    let temp_dir = std::env::temp_dir().join("ticketchan_pdfium");
     let _ = std::fs::create_dir_all(&temp_dir);
     let output_path = temp_dir.join("pdfium_cache.pdf");
 

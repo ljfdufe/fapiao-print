@@ -422,7 +422,7 @@ pub fn pdfium_vector_print(
         ));
     }
 
-    let doc_name_w: Vec<u16> = "发票打印".encode_utf16().chain(std::iter::once(0)).collect();
+    let doc_name_w: Vec<u16> = "发票酱".encode_utf16().chain(std::iter::once(0)).collect();
     let doc_info = DOCINFOW {
         cbSize: std::mem::size_of::<DOCINFOW>() as i32,
         lpszDocName: PCWSTR(doc_name_w.as_ptr()),
