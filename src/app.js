@@ -2256,6 +2256,9 @@ function saveSettings() {
   if (_summaryActiveCols && _summaryActiveCols.length > 0) {
     o.summaryCols = _summaryActiveCols;
   }
+  // Persist rename template and separator
+  if (_renameTemplate && _renameTemplate.length > 0) o.renameTemplate = _renameTemplate;
+  if (_renameSeparator) o.renameSeparator = _renameSeparator;
   // Persist per-file notes (keyed by file name)
   var notesMap = {};
   S.files.forEach(function(f) { if (f.note && f.name) notesMap[f.name] = f.note; });
@@ -2344,7 +2347,14 @@ function loadSettings() {
   // Restore summary table column selection
   if (o.summaryCols && Array.isArray(o.summaryCols) && o.summaryCols.length > 0) {
     _summaryActiveCols = o.summaryCols;
+    // v2.0.6 migration: ensure note column is included for existing users
+    if (_summaryActiveCols.indexOf('note') < 0) _summaryActiveCols.push('note');
   }
+  // Restore rename template and separator
+  if (o.renameTemplate && Array.isArray(o.renameTemplate) && o.renameTemplate.length > 0) {
+    _renameTemplate = o.renameTemplate;
+  }
+  if (o.renameSeparator) _renameSeparator = o.renameSeparator;
   // Restore per-file notes (applied when files are added)
   S._notesMap = o.summaryNotes || {};
   // Load saved per-file slot adjustments (applied when files are added)
@@ -2764,7 +2774,7 @@ var SUMMARY_FIELDS = [
   { key: 'taxAmount', label: '税额',      type: 'amount',  default: false, editable: true },
   { key: 'name',      label: '文件名',    type: 'text',    default: false, editable: true },
   { key: 'copies',    label: '份数',      type: 'copies',  default: false, editable: true },
-  { key: 'note',      label: '备注',      type: 'text',    default: false, editable: true }
+  { key: 'note',      label: '备注',      type: 'text',    default: true, editable: true }
 ];
 
 var _summaryActiveCols = []; // keys of currently visible columns
@@ -2792,17 +2802,26 @@ function openSummaryModal() {
   renderSummaryColumns();
   renderSummaryTable();
 
-  // Reset rename panel
+  // Reset rename panel UI
   document.getElementById('summaryRenamePanel').classList.add('hidden');
   document.getElementById('summaryRenameBtn').classList.remove('active');
-  _renameTemplate = ['amountTax', 'sellerName', 'invoiceNo'];
   _renamePreview = [];
-  document.getElementById('srpSep').value = '_';
+  document.getElementById('srpSep').value = _renameSeparator || '_';
   document.getElementById('srpError').style.display = 'none';
-  // Reset preset buttons to first (金额+销售方)
+  // Highlight the matching preset button, or clear all if custom
   document.querySelectorAll('.srp-preset').forEach(function(p) { p.classList.remove('active'); });
-  var firstPreset = document.querySelector('.srp-preset');
-  if (firstPreset) firstPreset.classList.add('active');
+  document.querySelectorAll('.srp-preset').forEach(function(p) {
+    var keys = p.getAttribute('onclick');
+    if (keys) {
+      var match = keys.match(/\[([^\]]+)\]/);
+      if (match) {
+        var presetKeys = match[1].replace(/'/g, '').split(',');
+        if (presetKeys.length === _renameTemplate.length && presetKeys.every(function(k, i) { return k === _renameTemplate[i]; })) {
+          p.classList.add('active');
+        }
+      }
+    }
+  });
 
   document.getElementById('summaryModal').classList.remove('hidden');
 }
@@ -3067,6 +3086,7 @@ var RENAME_FIELDS = [
   { key: 'invoiceNo',       label: '发票号码'   },
   { key: 'invoiceDate',     label: '开票日期'   },
   { key: 'invoiceType',     label: '发票类型'   },
+  { key: 'note',           label: '备注'       },
 ];
 
 function toggleSummaryRename() {
@@ -3097,6 +3117,7 @@ function renderRenameFields() {
     var checked = _renameTemplate.indexOf(f.key) >= 0 ? ' checked' : '';
     html += '<label class="srp-field-item"><input type="checkbox" id="srpChk_' + f.key + '"' + checked + ' onchange="onRenameFieldToggle(\'' + f.key + '\')">' + escHtml(f.label) + '</label>';
   });
+  html += '<span class="srp-field-actions"><a onclick="renameFieldsClear()">清除</a></span>';
   // Show current template order as hint
   var orderHint = _renameTemplate.map(function(key) {
     var f = RENAME_FIELDS.find(function(rf) { return rf.key === key; });
@@ -3114,6 +3135,12 @@ function onRenameFieldToggle(key) {
   } else {
     _renameTemplate = _renameTemplate.filter(function(k) { return k !== key; });
   }
+  renderRenameFields();
+  updateRenamePreview();
+}
+
+function renameFieldsClear() {
+  _renameTemplate = [];
   renderRenameFields();
   updateRenamePreview();
 }
@@ -3203,16 +3230,26 @@ function updateRenamePreview() {
   _renamePreview = preview;
 
   // Render preview table
-  var html = '<table class="srp-preview-table"><thead><tr><th class="srp-status"></th><th>原文件名</th><th>新文件名</th></tr></thead><tbody>';
+  var hasNote = _renameTemplate.indexOf('note') >= 0;
+  var html = '<table class="srp-preview-table"><thead><tr><th class="srp-status"></th><th>原文件名</th>'
+    + (hasNote ? '<th class="srp-note-col">备注</th>' : '')
+    + '<th>新文件名</th></tr></thead><tbody>';
   var execCount = 0;
-  preview.forEach(function(p) {
+  preview.forEach(function(p, pIdx) {
     var statusIcon = '', statusCls = '';
     switch (p.status) {
       case 'ok':     statusIcon = (p.reason === '已匹配' ? '✓' : '→'); statusCls = p.reason === '已匹配' ? 'srp-status-skip' : 'srp-status-ok'; break;
       case 'conflict': statusIcon = '⚠'; statusCls = 'srp-status-warn'; break;
       case 'skip':   statusIcon = '✗'; statusCls = 'srp-status-error'; break;
     }
-    html += '<tr><td class="srp-status ' + statusCls + '">' + statusIcon + '</td><td>' + escHtml(p.oldName) + '</td><td>' + escHtml(p.newName || '— 跳过 —') + '</td></tr>';
+    var noteCell = '';
+    if (hasNote) {
+      var noteVal = p.fileObj.note || '';
+      noteCell = '<td class="srp-note-col"><input type="text" value="' + escHtml(noteVal) + '" class="srp-note-input" data-idx="' + pIdx + '" placeholder="备注" oninput="onRenameNoteInput(this)"></td>';
+    }
+    html += '<tr><td class="srp-status ' + statusCls + '">' + statusIcon + '</td><td>' + escHtml(p.oldName) + '</td>'
+      + noteCell
+      + '<td>' + escHtml(p.newName || '— 跳过 —') + '</td></tr>';
     if (p.status === 'ok' && p.reason !== '已匹配') execCount++;
     if (p.status === 'conflict') execCount++;
   });
@@ -3237,6 +3274,24 @@ function updateRenamePreview() {
 
   // Hide error div
   document.getElementById('srpError').style.display = 'none';
+}
+
+var _renameNoteTimer = 0;
+var _renameNoteDirty = false;
+function onRenameNoteInput(input) {
+  var idx = parseInt(input.dataset.idx);
+  var pv = _renamePreview[idx];
+  if (!pv || !pv.fileObj) return;
+  pv.fileObj.note = input.value;
+  _renameNoteDirty = true;
+  clearTimeout(_renameNoteTimer);
+  _renameNoteTimer = setTimeout(function() {
+    updateRenamePreview();
+    if (!document.getElementById('summaryModal').classList.contains('hidden')) {
+      renderSummaryTable();
+    }
+    _renameNoteDirty = false;
+  }, 300);
 }
 
 function resolveNameConflicts(preview) {
@@ -3264,6 +3319,7 @@ function resolveNameConflicts(preview) {
 }
 
 async function executeRename() {
+  if (_renameNoteDirty) { updateRenamePreview(); _renameNoteDirty = false; }
   var execList = _renamePreview.filter(function(p) {
     return (p.status === 'ok' && p.reason !== '已匹配') || p.status === 'conflict';
   });
