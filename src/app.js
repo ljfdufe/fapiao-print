@@ -2893,6 +2893,28 @@ function setSummaryCellValue(fileObj, field, value) {
   }
 }
 
+var _nextNoteFocusIdx = -1;
+
+function focusSummaryNoteInput(idx) {
+  var input = document.querySelector('#summaryTable input[data-idx="' + idx + '"][data-key="note"]');
+  if (input) { input.focus(); input.select(); }
+  _nextNoteFocusIdx = -1;
+}
+
+function onSummaryNoteKeyNav(e, input) {
+  if (e.key === 'Tab' && !e.shiftKey || e.key === 'Enter') {
+    var idx = parseInt(input.dataset.idx);
+    var files = getCheckedFiles();
+    if (idx >= files.length - 1) return;
+    e.preventDefault();
+    _nextNoteFocusIdx = idx + 1;
+    input.blur(); // triggers onchange → renderSummaryTable if value changed
+    if (_nextNoteFocusIdx >= 0) {
+      focusSummaryNoteInput(_nextNoteFocusIdx);
+    }
+  }
+}
+
 // Render the data table based on current column selection
 function renderSummaryTable() {
   var files = getCheckedFiles();
@@ -2927,7 +2949,8 @@ function renderSummaryTable() {
         var inputCls = 'summary-cell-input' + (f.type === 'amount' || f.key === 'copies' ? ' number' : '');
         var isEdited = _summaryOriginalData[idx] && _summaryOriginalData[idx][f.key] !== undefined && _summaryOriginalData[idx][f.key] !== val;
         if (isEdited) inputCls += ' edited';
-        html += '<td class="' + cls + '"><input class="' + inputCls + '" value="' + escHtml(val) + '" data-idx="' + idx + '" data-key="' + f.key + '" onchange="onSummaryCellEdit(this)" onfocus="this.select()"></td>';
+        var extraAttrs = f.key === 'note' ? ' onkeydown="onSummaryNoteKeyNav(event, this)"' : '';
+        html += '<td class="' + cls + '"><input class="' + inputCls + '" value="' + escHtml(val) + '" data-idx="' + idx + '" data-key="' + f.key + '" onchange="onSummaryCellEdit(this)" onfocus="this.select()"' + extraAttrs + '></td>';
       }
 
       if (f.key === 'amountTax' && fileObj.amountTax > 0) totalAmountTax += fileObj.amountTax;
@@ -2960,6 +2983,11 @@ function renderSummaryTable() {
   // Update total below table
   var totalEl = document.getElementById('summaryTotal');
   totalEl.textContent = '共 ' + files.length + ' 张发票';
+
+  // Restore focus for note-keyboard-nav
+  if (_nextNoteFocusIdx >= 0) {
+    focusSummaryNoteInput(_nextNoteFocusIdx);
+  }
 }
 
 // Handle cell edit — sync back to fileObj + refresh all UI
