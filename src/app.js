@@ -2665,6 +2665,13 @@ document.addEventListener('keydown', function(e) {
   if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); changeZoom(5); }
   if ((e.ctrlKey || e.metaKey) && e.key === '-') { e.preventDefault(); changeZoom(-5); }
   if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); setZoom('fit'); }
+  if (e.key === 'Escape') {
+    var sm = document.getElementById('summaryModal');
+    if (sm && !sm.classList.contains('hidden')) {
+      e.preventDefault();
+      closeSummaryModal();
+    }
+  }
 });
 
 // Ctrl+Wheel zoom
@@ -3068,17 +3075,18 @@ function setSummaryCellValue(fileObj, field, value) {
   }
 }
 
-// Enter key: jump to next row, same column (Tab stays native)
+// Enter: next row same column / Shift+Enter: previous row same column
 function onSummaryKeyNav(e, input) {
   if (e.key !== 'Enter') return;
+  var shift = e.shiftKey;
   var idx = parseInt(input.dataset.idx);
   var key = input.dataset.key;
   var files = getCheckedFiles();
-  if (idx >= files.length - 1) return;
+  if (shift ? idx <= 0 : idx >= files.length - 1) return;
   e.preventDefault();
   input.blur(); // triggers onchange → renderSummaryTable (sync) if value changed
-  var next = document.querySelector('#summaryTable input[data-idx="' + (idx + 1) + '"][data-key="' + key + '"]');
-  if (next) { next.focus(); next.select(); }
+  var target = document.querySelector('#summaryTable input[data-idx="' + (idx + (shift ? -1 : 1)) + '"][data-key="' + key + '"]');
+  if (target) { target.focus(); target.select(); }
 }
 
 // Render the data table based on current column selection
