@@ -2,11 +2,11 @@
 
 ## 项目概览
 
-- **版本**: v2.0.5
+- **版本**: v2.0.6
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
-- **OFD 解析**: `src-tauri/ofd-engine/` — 独立 crate
+- **OFD/XML 解析**: `src-tauri/invoice-engine/` — 独立 crate（原 ofd-engine，v2.0.6 更名）
 - **双版本**: 轻量版 / OCR版（含 PP-OCRv5）
 
 ## 常用命令
@@ -68,12 +68,24 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 
 ### 发票字段提取
 
-**路径优先级**: PDF文字层 > OFD XML > OCR
+**路径优先级**: PDF文字层 > OFD XML > XML 数电票 > OCR
 
 - **发票类型检测**: `_detectInvoiceType()` — nontax(优先级最高) > vat > ticket > ride > unknown
 - **金额三阶段**: 含税价 → 数学验证配对 → 区域解析
 - **中文大写兜底**: `parseChineseNumeral()` — 阿拉伯金额因字体/编码丢失时的 fallback
 - **OCR 跳过条件**: `_pdfTextExtracted && sellerName && amountTax > 0`
+
+### XML 数电票解析 (v2.0.6+)
+
+`invoice-engine::parse_xml_invoice()` 解析独立 XML 数电票文件，提取结构化发票数据。
+
+- **格式**: 纯结构化数据（`<EInvoice>` 根元素），**无版式/排版信息**，不可渲染票面
+- **用途**: 文件列表展示、金额统计、汇总表导出、批量重命名
+- **不参与排版打印**: `getActiveFiles()` 过滤 `_xmlInvoice` 标记，`getFileIndex()` 返回 null
+- **字段提取**: `parse_xml_invoice_fields()` — 字符串匹配提取标签内容，比事件解析更可靠
+- **提取字段**: 发票号码/日期/销售方/购买方/金额/发票类型
+- **前端标记**: `fileObj._xmlInvoice = true`，无 `previewUrl`/`ow`/`oh`
+- **文件列表**: 显示 XML 占位符 + 发票尾号，而非图片缩略图
 
 ### PDF 文字层提取 (v1.9.4+ / 批量 v1.10.5)
 
@@ -260,7 +272,7 @@ PDFium 打印失败时自动 fallback 到 SumatraPDF，提升容错性。
 
 | 文件 | 职责 |
 |------|------|
-| `app.js` | 主入口、状态管理(S)、文件加载（批量IPC+并行渲染）、Tauri IPC、设置持久化、批量文字提取分发 |
+| `app.js` | 主入口、状态管理(S)、文件加载（批量IPC+并行渲染）、Tauri IPC、设置持久化、批量文字提取分发、XML数电票加载 |
 | `ocr.js` | 发票字段提取、金额解析、中文大写解析、类型检测、金额校验 |
 | `layout.js` | 布局计算、预览渲染、单票调整拖拽、slot 交互 |
 | `print.js` | 打印/导出、构建 LayoutRenderRequest、智能 PDF 缓存（deepEqual）、四种打印模式分发、PDFium→SumatraPDF 自动降级 |

@@ -61,6 +61,8 @@ function buildLayoutRequest(files, settings) {
 
   function getFileIndex(fileObj) {
     if (!fileObj) return null;
+    // XML 数电票 has no visual layout — skip from print layout
+    if (fileObj._xmlInvoice) return null;
     // Use _filePath as dedup key when available (more stable than previewUrl).
     // For OFD, fall back to previewUrl since _filePath is shared across pages.
     var key = (fileObj.type !== 'ofd' && fileObj._filePath) ? fileObj._filePath : (fileObj.previewUrl || '');
@@ -297,6 +299,7 @@ async function doSumatraPrint(files, s) {
       hideLoading();
       if (result.success) {
         toast('\uD83D\uDCA8 ' + result.message);
+        markFilesAsPrinted(files);
         return;
       }
     } catch(e) {
@@ -337,6 +340,7 @@ async function doSumatraPrint(files, s) {
           hideLoading();
           if (printResult.success) {
             toast('\uD83D\uDCA8 ' + printResult.message);
+            markFilesAsPrinted(files);
           } else {
             toast('打印失败：' + printResult.message);
           }
@@ -396,6 +400,7 @@ async function doPdfiumPrint(files, s) {
       hideLoading();
       if (cacheResult.success) {
         toast('\uD83D\uDCA8 ' + cacheResult.message);
+        markFilesAsPrinted(files);
         return;
       }
       console.warn('Cached PDF PDFium print failed, regenerating:', cacheResult.message);
@@ -423,6 +428,7 @@ async function doPdfiumPrint(files, s) {
       if (result.success) {
         if (result.pdfPath) updatePdfCache(currentRequest, result.pdfPath);
         toast('\uD83D\uDCA8 ' + result.message);
+        markFilesAsPrinted(files);
       } else {
         console.warn('PDFium print failed, falling back to SumatraPDF:', result.message);
         toast('PDFium打印失败，尝试使用 SumatraPDF...');
@@ -456,6 +462,7 @@ async function doPdfReaderPrint(files, s) {
       hideLoading();
       if (cacheResult.success) {
         toast('\uD83D\uDCC4 ' + cacheResult.message);
+        markFilesAsPrinted(files);
         return;
       }
     } catch(e) {
@@ -493,6 +500,7 @@ async function doPdfReaderPrint(files, s) {
           hideLoading();
           if (printResult.success) {
             toast('\uD83D\uDCC4 ' + printResult.message);
+            markFilesAsPrinted(files);
           } else {
             toast('打印失败：' + printResult.message);
           }

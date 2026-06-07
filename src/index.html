@@ -51,6 +51,11 @@
             <button class="ib danger" onclick="deleteSelected()" title="删除">🗑</button>
           </div>
         </div>
+        <div class="print-filter-bar" id="printFilterBar">
+          <button class="pf-btn pf-active" data-filter="all" onclick="setPrintedFilter('all')">全部</button>
+          <button class="pf-btn" data-filter="unprinted" onclick="setPrintedFilter('unprinted')">未打印</button>
+          <button class="pf-btn" data-filter="printed" onclick="setPrintedFilter('printed')">已打印</button>
+        </div>
         <div id="fileList"></div>
       </div>
       <div class="sidebar-panel-footer">
@@ -248,6 +253,15 @@
           <div class="sec-title">🎯 单票调整</div>
           <div class="trow"><label class="tlbl">记忆调整配置</label><button class="tgl" id="toggleSlotAdjMemory" onclick="togglePref('slotAdjMemory',this)"></button></div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">开启后关闭软件重新打开时，自动恢复每张发票的缩放、偏移和对齐设置（按文件名匹配）。</div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">📋 发票管理</div>
+          <div class="trow"><label class="tlbl">记忆发票列表</label>
+            <button class="tgl" id="toggleFileListMemory" onclick="toggleFileListMemory(this)"></button>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">
+            开启后关闭软件重新打开时自动恢复上次的发票列表和打印状态。关闭则每次打开均为空白。
+          </div>
         </div>
         <div class="sec">
           <div class="sec-title">🎨 外观</div>

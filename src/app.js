@@ -32,6 +32,7 @@ var S = {
   editIdx: -1,
   selectedSlot: -1,  // Index of currently selected slot in preview (for per-slot adjustment)
   amtMode: 'tax',
+  printedFilter: 'all',
   ocrPrecision: 'standard',
   feat: {
     cutline: true, number: false, border: false, trimWhite: false,
@@ -40,7 +41,8 @@ var S = {
     autoOpenPdf: true,
     ocrEnabled: false,
     pdfTextEnabled: true,
-    customFM: false
+    customFM: false,
+    fileListMemory: false
   }
 };
 
@@ -77,10 +79,12 @@ function createFileObj(opts) {
     invoiceDate: opts.invoiceDate || '',
     buyerName: opts.buyerName || '',
     buyerCreditCode: opts.buyerCreditCode || '',
+    invoiceType: opts.invoiceType || '',
     _ocrText: opts._ocrText || '',
     _isTicket: opts._isTicket || false,
     _loading: opts._loading || false,
     _ocrPending: false,
+    _xmlInvoice: opts._xmlInvoice || false,
     // Disk path for the original file (when available).
     // Used by Rust to read bytes directly, skipping base64 encode/decode.
     _filePath: opts.filePath || '',
@@ -91,7 +95,8 @@ function createFileObj(opts) {
     // Per-slot adjustment: scale & position within the layout slot
     slotScale: opts.slotScale || 1,        // 1.0 = default (contain-fit size)
     slotOffsetX: opts.slotOffsetX || 0,    // X offset in mm (0 = centered)
-    slotOffsetY: opts.slotOffsetY || 0     // Y offset in mm (0 = centered)
+    slotOffsetY: opts.slotOffsetY || 0,    // Y offset in mm (0 = centered)
+    _printed: false                        // True after successful print
   };
 
   // Apply saved per-file adjustments if memory is enabled
@@ -107,6 +112,11 @@ function createFileObj(opts) {
   // Restore saved note for this file
   if (S._notesMap && S._notesMap[obj.name]) {
     obj.note = S._notesMap[obj.name];
+  }
+  // Restore printed state
+  var printKey = obj._filePath || obj._pdfPath;
+  if (printKey && _printedMap && _printedMap[printKey]) {
+    obj._printed = true;
   }
 
   return obj;
@@ -469,6 +479,40 @@ function ocrMaxDim() {
 // =====================================================
 // FILE UPLOAD — via Tauri dialog plugin
 // =====================================================
+async function restoreFiles(paths) {
+  _isRestoringFiles = true;
+  var checks = await Promise.all(paths.map(function(p) {
+    return invoke('check_path_exists', { path: p })
+      .then(function(info) { return { path: p, valid: !!(info && info.exists && info.isFile) }; })
+      .catch(function() { return { path: p, valid: false }; });
+  }));
+  var valid = checks.filter(function(c) { return c.valid; }).map(function(c) { return c.path; });
+  var skipped = paths.length - valid.length;
+  if (!valid.length) {
+    _isRestoringFiles = false;
+    renderFileList();
+    if (skipped > 0) toast('上次的 ' + skipped + ' 个文件已不存在，已自动跳过');
+    return;
+  }
+  try {
+    if (valid.length <= 3) {
+      toastLoading('恢复 ' + valid.length + ' 个文件...');
+      var fileDataList = await invoke('open_invoice_files', { paths: valid });
+      if (fileDataList && fileDataList.length > 0) {
+        await processFileDataList(fileDataList);
+      }
+    } else {
+      await processFilesIncremental(valid);
+    }
+  } catch(e) {
+    toast('恢复发票列表失败: ' + String(e));
+  }
+  // Delay to allow async applyPdfTextToResults callbacks to finish
+  // before clearing the OCR-skip flag (they fire after processFileDataList returns)
+  setTimeout(function() { _isRestoringFiles = false; }, 3000);
+  if (skipped > 0) toast('上次的 ' + skipped + ' 个文件已不存在，已自动跳过');
+}
+
 async function triggerUpload() {
   if (isTauri && invoke) {
     try {
@@ -476,7 +520,7 @@ async function triggerUpload() {
         options: {
           multiple: true,
           title: '选择发票文件',
-          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif', 'ofd'] }]
+          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif', 'ofd', 'xml'] }]
         }
       });
       if (!result) return;
@@ -881,6 +925,9 @@ var _ocrBatchAddedCount = 0; // Total added files in current loading batch (for 
 /** Yield to browser for reliable painting — double rAF ensures at least one frame is painted */
 function nextFrame() { return new Promise(function(r) { requestAnimationFrame(function() { requestAnimationFrame(r); }); }); }
 var _activeFileIdx = -1;   // Index of currently active/highlighted file in sidebar
+var _printedMap = {};      // Printed state cache: {filePath: true}
+var _restoreFilePaths = null; // File paths to restore on startup
+var _isRestoringFiles = false; // True while restoring files (skip OCR)
 
 function _onOcrTaskDone() {
   _ocrRunning--;
@@ -947,6 +994,7 @@ function updateOcrAllBtn() {
 
 function applyOcrAsync(fileObj, dataUrl) {
   if (!hasOcr || !isTauri || !invoke || window.__TAURI_CLOSING__) return;
+  if (_isRestoringFiles) return; // Skip OCR during file list restoration
   // Skip OCR if PDF text extraction already covered all key fields
   if (fileObj._pdfTextExtracted && fileObj.sellerName && fileObj.amountTax > 0) {
     console.log('[OCR] PDF文字提取已覆盖关键字段，跳过OCR');
@@ -1273,6 +1321,7 @@ function loadFileFromDataUrlFast(fd) {
           invoiceDate: info.invoiceDate || '',
           buyerName: info.buyerName || '',
           buyerCreditCode: info.buyerTaxId || '',
+          invoiceType: info.invoiceType || '',
           // OFD page dimensions for layout
           ow: payload.img.naturalWidth,
           oh: payload.img.naturalHeight,
@@ -1311,6 +1360,39 @@ function loadFileFromDataUrlFast(fd) {
     }
     else if (ext === 'ofd') {
       toast('OFD 格式请使用桌面版打开');
+      resolve(null);
+    }
+    // XML 数电票: structured data only, no visual layout
+    else if (ext === 'xml' && isTauri && invoke && filePath) {
+      invoke('parse_xml_invoice', { xmlPath: filePath }).then(function(info) {
+        var fileObj = createFileObj({
+          id: id, name: name, size: size, type: 'xml',
+          filePath: filePath || '',
+          // Structured data from XML — skip OCR
+          amountTax: info.amountTax || 0,
+          amountNoTax: info.amountNoTax || 0,
+          taxAmount: info.taxAmount || 0,
+          sellerName: info.sellerName || '',
+          sellerCreditCode: info.sellerTaxId || '',
+          invoiceNo: info.invoiceNo || '',
+          invoiceDate: info.invoiceDate || '',
+          buyerName: info.buyerName || '',
+          buyerCreditCode: info.buyerTaxId || '',
+          invoiceType: info.invoiceType || '',
+          // XML has no preview image — use placeholder dimensions
+          ow: 0, oh: 0,
+          _xmlInvoice: true
+        });
+        resolve(fileObj);
+      }).catch(function(err) {
+        console.warn('[XML] parse_xml_invoice failed:', err);
+        toast('XML 发票解析失败: ' + String(err));
+        resolve(null);
+      });
+      return;
+    }
+    else if (ext === 'xml') {
+      toast('XML 格式请使用桌面版打开');
       resolve(null);
     }
     else {
@@ -1367,6 +1449,10 @@ function loadFileFast(file) {
       toast('OFD 格式请使用桌面版打开');
       resolve(null);
     }
+    else if (ext === 'xml') {
+      toast('XML 格式请使用桌面版打开');
+      resolve(null);
+    }
     else {
       toast('不支持的格式: ' + ext);
       resolve(null);
@@ -1388,11 +1474,29 @@ async function handleDrop(e) {
 // =====================================================
 // File list management
 // =====================================================
+function setPrintedFilter(filter) {
+  S.printedFilter = filter;
+  document.querySelectorAll('.pf-btn').forEach(function(b) {
+    b.classList.toggle('pf-active', b.dataset.filter === filter);
+  });
+  renderFileList();
+}
+
+function getFilteredFiles() {
+  if (S.printedFilter === 'all') return S.files;
+  return S.files.filter(function(f) {
+    if (S.printedFilter === 'printed') return f._printed;
+    if (S.printedFilter === 'unprinted') return !f._printed;
+    return true;
+  });
+}
+
 function renderFileList() {
   var list = document.getElementById('fileList');
   var scrollTop = list.scrollTop;
-  var sel = S.files.filter(function(f) { return f.checked; }).length;
-  document.getElementById('fileCount').textContent = S.files.length + ' 张，已选 ' + sel;
+  var filtered = getFilteredFiles();
+  var sel = filtered.filter(function(f) { return f.checked; }).length;
+  document.getElementById('fileCount').textContent = filtered.length + ' 张，已选 ' + sel;
   var summaryEl = document.getElementById('amountSummary');
   if (!S.files.length) { list.innerHTML = ''; if (summaryEl) summaryEl.style.display = 'none'; updateAmountSummary(); return; }
   if (summaryEl) summaryEl.style.display = 'flex';
@@ -1406,6 +1510,8 @@ function renderFileList() {
     if (currentNewIds[f.id]) cls += ' entering';
     if (f._loading) cls += ' loading-item';
     if (i === _activeFileIdx) cls += ' active-item';
+    var hidden = (S.printedFilter === 'printed' && !f._printed) || (S.printedFilter === 'unprinted' && f._printed);
+    var hideStyle = hidden ? ' style="display:none"' : '';
     var cb = f.copies > 1 ? '<span class="copy-badge">' + f.copies + '份</span>' : '';
     var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
     var ab = buildAmtBadge(f);
@@ -1414,23 +1520,25 @@ function renderFileList() {
     // XSS FIX: escHtml(f.previewUrl) in img src, escHtml(f.type) in type-badge
     var safePreviewUrl = escHtml(f.previewUrl || '');
     var safeType = escHtml(f.type === 'jpeg' ? 'jpg' : f.type);
-    var thumbContent = f._loading ? '' : (f.previewUrl ? '<img src="' + safePreviewUrl + '">' : '\uD83D\uDCC4');
+    var typeBadgeText = f._xmlInvoice && f.invoiceType ? escHtml(f.invoiceType.replace(/^[^(]*\(/, '').replace(/\)$/, '') || f.invoiceType) : safeType;
+    var thumbContent = f._loading ? '' : (f.previewUrl ? '<img src="' + safePreviewUrl + '">' : (f._xmlInvoice ? '<div class="xml-placeholder"><span class="xml-icon">XML</span>' + (f.invoiceNo ? '<span class="xml-no">' + escHtml(f.invoiceNo.slice(-4)) + '</span>' : '') + '</div>' : '\uD83D\uDCC4'));
     var ocrBtnHtml = hasOcr
       ? (f._ocrPending
         ? '<button class="ib ocr-btn" disabled title="识别中"><span class="ocr-spinner"></span></button>'
         : '<button class="ib ocr-btn" onclick="ocrFile(' + i + ')" title="OCR识别">\uD83D\uDD0D</button>')
       : '';
+    var pd = f._printed ? '<span class="printed-dot" title="已打印">✓</span>' : '';
     var metaActions = f._loading
       ? '<button class="ib danger" onclick="rmFile(' + i + ')">\u2715</button>'
-      : '<div class="file-meta-left"><span class="file-size">' + fmtSize(f.size) + '</span>' + cb + rb + ab + '</div>' +
+      : '<div class="file-meta-left">' + pd + '<span class="file-size">' + fmtSize(f.size) + '</span>' + cb + rb + ab + '</div>' +
         '<div class="file-meta-sep"></div>' +
         '<div class="file-meta-right">' +
         '<button class="ib sort-btn' + (i === 0 ? ' disabled' : '') + '" onclick="moveFile(' + i + ',-1)" title="上移">\u25B2</button>' +
         '<button class="ib sort-btn' + (i === S.files.length - 1 ? ' disabled' : '') + '" onclick="moveFile(' + i + ',1)" title="下移">\u25BC</button>' +
         ocrBtnHtml + '<button class="ib" onclick="rotFile(' + i + ')" title="旋转90°">\u21BB</button><button class="ib danger" onclick="rmFile(' + i + ')">\u2715</button></div>';
-    return '<div class="' + cls + '" data-idx="' + i + '" onclick="clickFileItem(' + i + ',event)" ondblclick="openInvModal(' + i + ')">' +
+    return '<div class="' + cls + '" data-idx="' + i + '" data-printed="' + (f._printed ? '1' : '0') + '"' + hideStyle + ' onclick="clickFileItem(' + i + ',event)" ondblclick="openInvModal(' + i + ')">' +
       '<div class="file-check ' + (f.checked ? 'checked' : '') + '" onclick="togCheck(' + i + ')"></div>' +
-      '<div class="file-thumb">' + thumbContent + '<div class="type-badge">' + safeType + '</div></div>' +
+      '<div class="file-thumb">' + thumbContent + '<div class="type-badge">' + typeBadgeText + '</div></div>' +
       '<div class="file-info"><div class="file-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' + (sb ? '<div class="file-seller" title="' + escHtml(f.sellerName) + '">' + sb + '</div>' : '') + '<div class="file-meta">' + metaActions + '</div></div>' +
     '</div>';
   }).join('');
@@ -1488,7 +1596,18 @@ function ocrAll() {
   toastLoading('识别中，共 ' + targets.length + ' 张...');
   targets.forEach(function(f) { applyOcrAsync(f, f.previewUrl); });
 }
-function clearAll() { if (!S.files.length) return; if (!confirm('确认清除所有发票？')) return; S.files = []; _activeFileIdx = -1; renderFileList(); updatePreview(); updatePrintBtn(); updateSummaryBtn(); }
+function clearAll() {
+  if (!S.files.length) return;
+  if (!confirm('确认清除所有发票？')) return;
+  S.files = [];
+  _activeFileIdx = -1;
+  _printedMap = {};
+  saveSettings();
+  renderFileList();
+  updatePreview();
+  updatePrintBtn();
+  updateSummaryBtn();
+}
 
 // Click file item → navigate preview to the page containing this invoice
 function clickFileItem(idx, event) {
@@ -2074,8 +2193,18 @@ function getCheckedFiles() {
   return S.files.filter(function(f) { return f.checked && !f._loading; });
 }
 
+function markFilesAsPrinted(files) {
+  files.forEach(function(f) {
+    f._printed = true;
+    var key = f._filePath || f._pdfPath;
+    if (key) _printedMap[key] = true;
+  });
+  saveSettings();
+  renderFileList();
+}
+
 function getActiveFiles() {
-  var files = S.files.filter(function(f) { return f.checked && !f._loading; });
+  var files = S.files.filter(function(f) { return f.checked && !f._loading && !f._xmlInvoice; });
   if (document.getElementById('pageOrder').value === 'reverse') files = files.slice().reverse();
   var exp = [];
   files.forEach(function(f) { for (var c = 0; c < Math.max(1, f.copies); c++) exp.push(f); });
@@ -2222,7 +2351,7 @@ function saveSettings() {
     printMode: document.getElementById('printMode').value,
     feat: {}
   };
-  var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory'];
+  var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory','fileListMemory'];
   featKeys.forEach(function(k) { o.feat[k] = S.feat[k]; });
   // Save per-file slot adjustments when memory is enabled
   if (S.feat.slotAdjMemory) {
@@ -2263,6 +2392,24 @@ function saveSettings() {
   var notesMap = {};
   S.files.forEach(function(f) { if (f.note && f.name) notesMap[f.name] = f.note; });
   if (Object.keys(notesMap).length > 0) o.summaryNotes = notesMap;
+  // Save printed state (always, regardless of fileListMemory switch)
+  var printedMap = {};
+  S.files.forEach(function(f) {
+    var key = f._filePath || f._pdfPath;
+    if (key && f._printed) printedMap[key] = true;
+  });
+  o.printedMap = printedMap;
+  // Save file paths only when memory is enabled (always write to clear stale data)
+  if (S.feat.fileListMemory) {
+    var filePaths = [];
+    S.files.forEach(function(f) {
+      var p = f._filePath || f._pdfPath;
+      if (p && filePaths.indexOf(p) < 0) filePaths.push(p);
+    });
+    o.filePaths = filePaths;
+  } else {
+    o.filePaths = [];
+  }
   try { localStorage.setItem('ticketchan-settings', JSON.stringify(o)); } catch(e) {}
 }
 
@@ -2307,7 +2454,8 @@ function loadSettings() {
       trimWhite: 'toggleTrimWhite', watermark: 'toggleWatermark', collate: 'toggleCollate',
       duplex: 'toggleDuplex', pageNum: 'togglePageNum', printDate: 'toggleDate',
       footer: 'toggleFooter', autoOpenPdf: 'toggleAutoOpenPdf', customFM: 'toggleCustomFM',
-      slotAdjMemory: 'toggleSlotAdjMemory'
+      slotAdjMemory: 'toggleSlotAdjMemory',
+      fileListMemory: 'toggleFileListMemory'
     };
     Object.keys(featMap).forEach(function(k) {
       if (o.feat[k] != null) {
@@ -2359,6 +2507,13 @@ function loadSettings() {
   S._notesMap = o.summaryNotes || {};
   // Load saved per-file slot adjustments (applied when files are added)
   S._fileAdjMap = (o.fileAdjustments && S.feat.slotAdjMemory) ? o.fileAdjustments : {};
+  // Restore printed state (always, regardless of switch)
+  if (o.printedMap) _printedMap = o.printedMap;
+  else _printedMap = {};
+  // Restore file paths only when memory is enabled
+  if (o.filePaths && o.filePaths.length > 0 && S.feat.fileListMemory) {
+    _restoreFilePaths = o.filePaths;
+  }
 }
 
 function togglePref(k, btn) {
@@ -2370,6 +2525,13 @@ function togglePref(k, btn) {
   if (k === 'pdfTextEnabled') {
     try { localStorage.setItem('ticketchan-pdf-text-enabled', S.feat[k] ? '1' : '0'); } catch(e) {}
   }
+  saveSettings();
+}
+
+function toggleFileListMemory(btn) {
+  S.feat.fileListMemory = !S.feat.fileListMemory;
+  btn.classList.toggle('on', S.feat.fileListMemory);
+  saveSettings();
 }
 
 function setOcrPrecision(val) {
@@ -2426,7 +2588,7 @@ function exportSettings() {
 function resetSettings() {
   if (!confirm('确认恢复所有默认设置？')) return;
   S.layout = { cols: 1, rows: 1 };
-  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true };
+  S.feat = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true, slotAdjMemory: false, fileListMemory: false };
   S.ocrPrecision = 'standard';
   S.viewZoom = 0;
   document.getElementById('paperSize').value = 'A4';
@@ -2477,6 +2639,12 @@ function resetSettings() {
   try { localStorage.removeItem('ticketchan-ocr-precision'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-pdf-text-enabled'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-settings'); } catch(e) {}
+  _printedMap = {};
+  S.printedFilter = 'all';
+  document.querySelectorAll('.pf-btn').forEach(function(b) {
+    b.classList.toggle('pf-active', b.dataset.filter === 'all');
+  });
+  renderFileList();
   document.getElementById('saveDir').value = '';
   document.getElementById('amtMode').value = 'tax';
   S.amtMode = 'tax';
@@ -2582,7 +2750,7 @@ window.addEventListener('beforeunload', function() {
 window._tauriFileDrop = function(paths) {
   if (!Array.isArray(paths)) return;
   if (paths.length === 0) {
-    toast('不支持的文件格式，请拖入 PDF/JPG/PNG/OFD 等发票文件');
+    toast('不支持的文件格式，请拖入 PDF/JPG/PNG/OFD/XML 等发票文件');
     return;
   }
   (async function() {
@@ -2742,6 +2910,12 @@ loadSettings();
         console.log('发票酱 v' + v + ' | isTauri:', isTauri);
       }).catch(function() {});
       try { invoke('show_window'); } catch(e) {}
+      // Restore file list from last session if memory is enabled
+      if (_restoreFilePaths && _restoreFilePaths.length) {
+        var pathsToRestore = _restoreFilePaths;
+        _restoreFilePaths = null;
+        restoreFiles(pathsToRestore);
+      }
     } else {
       // Non-Tauri (browser) fallback
       var el = document.getElementById('stVersion');
@@ -2870,6 +3044,7 @@ function getSummaryCellValue(fileObj, field, idx) {
   switch (field.key) {
     case 'seq': return String(idx + 1);
     case 'invoiceType':
+      if (fileObj._xmlInvoice && fileObj.invoiceType) return fileObj.invoiceType;
       if (fileObj._isTicket) return fileObj.sellerName || '车票'; // sellerName holds ticket label
       if (fileObj._ocrText && /非税/.test(fileObj._ocrText)) return '非税票据';
       return '增值税发票';
@@ -3383,6 +3558,11 @@ async function executeRename() {
       if (S._notesMap && S._notesMap[oldName] !== undefined) {
         S._notesMap[p.newName] = S._notesMap[oldName];
         delete S._notesMap[oldName];
+      }
+      // Migrate _printedMap (per-file printed state, keyed by file path)
+      if (!isBrowserMode && _printedMap[srcPath] !== undefined) {
+        _printedMap[newPath] = _printedMap[srcPath];
+        delete _printedMap[srcPath];
       }
 
       successCount++;
