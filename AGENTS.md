@@ -2,11 +2,11 @@
 
 ## 项目概览
 
-- **版本**: v2.0.6
+- **版本**: v2.0.7
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
-- **OFD/XML 解析**: `src-tauri/invoice-engine/` — 独立 crate（原 ofd-engine，v2.0.6 更名）
+- **OFD/XML 解析**: `src-tauri/invoice-engine/` — 独立 crate（v2.0.6 从 ofd-engine 更名，v2.0.7 整合 XML 数电票）
 - **双版本**: 轻量版 / OCR版（含 PP-OCRv5）
 
 ## 常用命令
@@ -75,7 +75,7 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **中文大写兜底**: `parseChineseNumeral()` — 阿拉伯金额因字体/编码丢失时的 fallback
 - **OCR 跳过条件**: `_pdfTextExtracted && sellerName && amountTax > 0`
 
-### XML 数电票解析 (v2.0.6+)
+### XML 数电票解析 (v2.0.7+)
 
 `invoice-engine::parse_xml_invoice()` 解析独立 XML 数电票文件，提取结构化发票数据。
 
@@ -86,6 +86,25 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **提取字段**: 发票号码/日期/销售方/购买方/金额/发票类型
 - **前端标记**: `fileObj._xmlInvoice = true`，无 `previewUrl`/`ow`/`oh`
 - **文件列表**: 显示 XML 占位符 + 发票尾号，而非图片缩略图
+
+### 文件列表记忆 (v2.0.7)
+
+可选功能，启动时自动恢复上次打开的文件列表。
+
+- **开关**: `S.feat.fileListMemory`，设置面板「记忆发票列表」，默认关闭
+- **恢复机制**: `restoreFiles()` 启动时批量恢复文件路径 → `check_path_exists` 校验存在性
+- **标志保护**: `_isRestoringFiles` 标志阻止恢复期间触发 OCR 自动识别
+- **轻量设计**: 仅记忆文件路径（不保存金额/OCR 数据），与设置持久化分离
+- **路径校验**: 启动时验证文件存在性，自动跳过已删除文件
+
+### 打印状态追踪 (v2.0.7)
+
+追踪发票是否已打印，支持过滤和持久化。
+
+- **三种过滤**: 侧边栏顶部「全部/未打印/已打印」`.print-filter-bar` 过滤按钮组
+- **自动标记**: 四种打印模式成功后自动 `markFilesAsPrinted()` → 绿色 ✓ 标识
+- **持久化**: `_printedMap` 始终保存到 localStorage，不受功能开关影响
+- **迁移**: `clearAll()` / `executeRename()` / `resetSettings()` 均正确迁移打印状态 key
 
 ### PDF 文字层提取 (v1.9.4+ / 批量 v1.10.5)
 
