@@ -3,6 +3,9 @@
 //! Supports Chinese electronic invoices (发票): extracts structured invoice data
 //! from OFD XML metadata (CustomData + CustomTag) and renders pages as SVG.
 //!
+//! Also supports standalone XML 数电票 (fully digitalized e-invoice) parsing:
+//! extracts structured invoice fields from `<EInvoice>` XML files.
+//!
 //! The OFD format is a ZIP archive containing XML page descriptions and image resources,
 //! defined by Chinese national standard GB/T 33190-2016.
 
@@ -47,6 +50,24 @@ pub struct OfdExtractedImage {
     pub ext: String,
     pub width: u32,
     pub height: u32,
+}
+
+/// Invoice data extracted from standalone XML 数电票 file.
+/// XML 数电票 is a structured data format (no layout info), used for archiving and data exchange.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct XmlInvoiceInfo {
+    pub invoice_no: Option<String>,
+    pub invoice_date: Option<String>,
+    pub seller_name: Option<String>,
+    pub seller_tax_id: Option<String>,
+    pub buyer_name: Option<String>,
+    pub buyer_tax_id: Option<String>,
+    pub amount_no_tax: Option<f64>,
+    pub tax_amount: Option<f64>,
+    pub amount_tax: Option<f64>,
+    /// Invoice type label (e.g. "增值税专用发票", "电子发票(普通发票)")
+    pub invoice_type: Option<String>,
 }
 
 // =====================================================
@@ -2152,4 +2173,299 @@ pub fn extract_ofd_images_raw(ofd_path: &str) -> Result<Vec<OfdExtractedImage>, 
         width: w,
         height: h,
     }).collect())
+}
+
+// =====================================================
+// XML 数电票 Parsing (standalone .xml files)
+// =====================================================
+
+/// Parse a standalone XML 数电票 file and extract structured invoice data.
+///
+/// The XML format follows the 国家税务总局《电子凭证会计数据标准》specification,
+/// with root element `<EInvoice>`. This is a pure data format with no layout info —
+/// it cannot be rendered as a visual invoice page.
+///
+/// Returns `XmlInvoiceInfo` with key fields for file list display, summary export, etc.
+pub fn parse_xml_invoice(xml_path: &str) -> Result<XmlInvoiceInfo, String> {
+    let content = std::fs::read_to_string(xml_path)
+        .map_err(|e| format!("读取 XML 文件失败: {}", e))?;
+
+    // Quick check: must contain <EInvoice> root element
+    if !content.contains("<EInvoice") {
+        return Err("不是有效的数电票 XML 文件（缺少 EInvoice 根元素）".to_string());
+    }
+
+    let info = parse_xml_invoice_content(&content)?;
+    Ok(info)
+}
+
+/// Parse XML 数电票 content string and extract structured invoice data.
+fn parse_xml_invoice_content(content: &str) -> Result<XmlInvoiceInfo, String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+
+    let mut info = XmlInvoiceInfo::default();
+    let mut buf = Vec::new();
+
+    // Track element path for context-aware parsing
+    let mut path: Vec<String> = Vec::new();
+    // Track LabelName values from EInvoiceType and GeneralOrSpecialVAT
+    let mut einvoice_type_label: Option<String> = None;
+    let mut general_or_special_label: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let local = e.local_name();
+                let name_str = String::from_utf8_lossy(local.as_ref()).to_string();
+                path.push(name_str);
+            }
+            Ok(Event::End(ref _e)) => {
+                path.pop();
+            }
+            Ok(Event::Empty(ref _e)) => {
+                // Self-closing tags like <SpecificInformation/> — nothing to extract
+            }
+            Ok(Event::Text(ref e)) => {
+                if let Ok(text) = e.unescape() {
+                    let text = text.trim();
+                    if text.is_empty() { continue; }
+
+                    let current_tag = path.last().map(|s| s.as_str()).unwrap_or("");
+                    // Check parent context for LabelName disambiguation
+                    let parent_tag = if path.len() >= 2 {
+                        path.get(path.len() - 2).map(|s| s.as_str()).unwrap_or("")
+                    } else {
+                        ""
+                    };
+
+                    match current_tag {
+                        // TaxSupervisionInfo
+                        "InvoiceNumber" => info.invoice_no = Some(text.to_string()),
+                        "IssueTime" => {
+                            info.invoice_date = Some(text.split('T').next().unwrap_or(text).to_string());
+                        }
+                        // Seller — skip empty values (e.g. personal invoices)
+                        "SellerName" => info.seller_name = Some(text.to_string()),
+                        "SellerIdNum" if !text.is_empty() => info.seller_tax_id = Some(text.to_string()),
+                        // Buyer — skip empty values (e.g. personal invoices where BuyerIdNum is empty)
+                        "BuyerName" => info.buyer_name = Some(text.to_string()),
+                        "BuyerIdNum" if !text.is_empty() => info.buyer_tax_id = Some(text.to_string()),
+                        // BasicInformation amounts
+                        "TotalAmWithoutTax" => info.amount_no_tax = text.parse().ok(),
+                        "TotalTaxAm" => info.tax_amount = text.parse().ok(),
+                        // TotalTax-includedAmount: tag name contains hyphen, quick-xml preserves it
+                        "TotalTax-includedAmount" => info.amount_tax = text.parse().ok(),
+                        // Invoice type: collect LabelName from different parent contexts
+                        "LabelName" => match parent_tag {
+                            "EInvoiceType" if einvoice_type_label.is_none() => {
+                                einvoice_type_label = Some(text.to_string());
+                            }
+                            "GeneralOrSpecialVAT" if general_or_special_label.is_none() => {
+                                general_or_special_label = Some(text.to_string());
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML 解析错误: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Compose invoice_type from EInvoiceType + GeneralOrSpecialVAT labels
+    // e.g. "电子发票" + "普通发票" → "电子发票(普通发票)"
+    // e.g. "电子发票" + "增值税专用发票" → "电子发票(增值税专用发票)"
+    if let Some(special_label) = &general_or_special_label {
+        let prefix = einvoice_type_label.as_deref().unwrap_or("电子发票");
+        info.invoice_type = Some(format!("{}({})", prefix, special_label));
+    } else if let Some(type_label) = &einvoice_type_label {
+        info.invoice_type = Some(type_label.clone());
+    }
+
+    // Fallback: if amount_tax still empty, try alternate tag name
+    if info.amount_tax.is_none() {
+        // Some XML variants may use TotalTaxIncludedAmount instead of TotalTax-includedAmount
+        let alt = content.find("<TotalTaxIncludedAmount>")
+            .and_then(|start| {
+                let text_start = start + "<TotalTaxIncludedAmount>".len();
+                content[text_start..].find("</TotalTaxIncludedAmount>")
+                    .map(|end| content[text_start..text_start + end].trim())
+            });
+        if let Some(v) = alt {
+            info.amount_tax = v.parse().ok();
+        }
+    }
+
+    Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_xml_general_invoice_personal() {
+        // 普通发票 - 个人购买方 (BuyerIdNum 为空)
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<EInvoice>
+  <Header>
+    <InherentLabel>
+      <EInvoiceType><LabelCode>01</LabelCode><LabelName>电子发票</LabelName></EInvoiceType>
+      <GeneralOrSpecialVAT><LabelCode>02</LabelCode><LabelName>普通发票</LabelName></GeneralOrSpecialVAT>
+    </InherentLabel>
+  </Header>
+  <EInvoiceData>
+    <SellerInformation>
+      <SellerIdNum>913416007050059877</SellerIdNum>
+      <SellerName>中国联合网络通信有限公司亳州市分公司</SellerName>
+    </SellerInformation>
+    <BuyerInformation>
+      <BuyerIdNum></BuyerIdNum>
+      <BuyerName>高宗林（个人）</BuyerName>
+    </BuyerInformation>
+    <BasicInformation>
+      <TotalAmWithoutTax>19.00</TotalAmWithoutTax>
+      <TotalTaxAm>0.00</TotalTaxAm>
+      <TotalTax-includedAmount>19.00</TotalTax-includedAmount>
+    </BasicInformation>
+  </EInvoiceData>
+  <TaxSupervisionInfo>
+    <InvoiceNumber>26347000000117553300</InvoiceNumber>
+    <IssueTime>2026-05-05</IssueTime>
+  </TaxSupervisionInfo>
+</EInvoice>"#;
+
+        let info = parse_xml_invoice_content(xml).unwrap();
+        assert_eq!(info.invoice_no.as_deref(), Some("26347000000117553300"));
+        assert_eq!(info.invoice_date.as_deref(), Some("2026-05-05"));
+        assert_eq!(info.seller_name.as_deref(), Some("中国联合网络通信有限公司亳州市分公司"));
+        assert_eq!(info.seller_tax_id.as_deref(), Some("913416007050059877"));
+        assert_eq!(info.buyer_name.as_deref(), Some("高宗林（个人）"));
+        assert_eq!(info.buyer_tax_id, None, "个人发票 BuyerIdNum 为空应为 None");
+        assert_eq!(info.amount_no_tax, Some(19.00));
+        assert_eq!(info.tax_amount, Some(0.00));
+        assert_eq!(info.amount_tax, Some(19.00));
+        assert_eq!(info.invoice_type.as_deref(), Some("电子发票(普通发票)"));
+    }
+
+    #[test]
+    fn test_parse_xml_special_vat_invoice() {
+        // 增值税专用发票
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<EInvoice>
+  <Header>
+    <InherentLabel>
+      <EInvoiceType><LabelCode>01</LabelCode><LabelName>电子发票</LabelName></EInvoiceType>
+      <GeneralOrSpecialVAT><LabelCode>01</LabelCode><LabelName>增值税专用发票</LabelName></GeneralOrSpecialVAT>
+    </InherentLabel>
+  </Header>
+  <EInvoiceData>
+    <SellerInformation>
+      <SellerIdNum>91320106751253359F</SellerIdNum>
+      <SellerName>安元科技股份有限公司</SellerName>
+    </SellerInformation>
+    <BuyerInformation>
+      <BuyerIdNum>9132020013590404XW</BuyerIdNum>
+      <BuyerName>江苏苏豪天鹏农产品集团有限公司</BuyerName>
+    </BuyerInformation>
+    <BasicInformation>
+      <TotalAmWithoutTax>18876.44</TotalAmWithoutTax>
+      <TotalTaxAm>1793.56</TotalTaxAm>
+      <TotalTax-includedAmount>20670.00</TotalTax-includedAmount>
+    </BasicInformation>
+  </EInvoiceData>
+  <TaxSupervisionInfo>
+    <InvoiceNumber>26322000004478296111</InvoiceNumber>
+    <IssueTime>2026-06-04</IssueTime>
+  </TaxSupervisionInfo>
+</EInvoice>"#;
+
+        let info = parse_xml_invoice_content(xml).unwrap();
+        assert_eq!(info.invoice_no.as_deref(), Some("26322000004478296111"));
+        assert_eq!(info.seller_name.as_deref(), Some("安元科技股份有限公司"));
+        assert_eq!(info.buyer_tax_id.as_deref(), Some("9132020013590404XW"));
+        assert_eq!(info.amount_no_tax, Some(18876.44));
+        assert_eq!(info.tax_amount, Some(1793.56));
+        assert_eq!(info.amount_tax, Some(20670.00));
+        assert_eq!(info.invoice_type.as_deref(), Some("电子发票(增值税专用发票)"));
+    }
+
+    #[test]
+    fn test_parse_xml_general_invoice_company() {
+        // 普通发票 - 企业购买方
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<EInvoice>
+  <Header>
+    <InherentLabel>
+      <EInvoiceType><LabelCode>01</LabelCode><LabelName>电子发票</LabelName></EInvoiceType>
+      <GeneralOrSpecialVAT><LabelCode>02</LabelCode><LabelName>普通发票</LabelName></GeneralOrSpecialVAT>
+    </InherentLabel>
+  </Header>
+  <EInvoiceData>
+    <SellerInformation>
+      <SellerIdNum>52320200509244470T</SellerIdNum>
+      <SellerName>无锡市安协安全培训中心</SellerName>
+    </SellerInformation>
+    <BuyerInformation>
+      <BuyerIdNum>9132020013590404XW</BuyerIdNum>
+      <BuyerName>江苏苏豪天鹏农产品集团有限公司</BuyerName>
+    </BuyerInformation>
+    <BasicInformation>
+      <TotalAmWithoutTax>235.85</TotalAmWithoutTax>
+      <TotalTaxAm>14.15</TotalTaxAm>
+      <TotalTax-includedAmount>250.00</TotalTax-includedAmount>
+    </BasicInformation>
+  </EInvoiceData>
+  <TaxSupervisionInfo>
+    <InvoiceNumber>25322000000365404822</InvoiceNumber>
+    <IssueTime>2025-08-08</IssueTime>
+  </TaxSupervisionInfo>
+</EInvoice>"#;
+
+        let info = parse_xml_invoice_content(xml).unwrap();
+        assert_eq!(info.invoice_no.as_deref(), Some("25322000000365404822"));
+        assert_eq!(info.buyer_name.as_deref(), Some("江苏苏豪天鹏农产品集团有限公司"));
+        assert_eq!(info.buyer_tax_id.as_deref(), Some("9132020013590404XW"));
+        assert_eq!(info.amount_tax, Some(250.00));
+        assert_eq!(info.invoice_type.as_deref(), Some("电子发票(普通发票)"));
+    }
+
+    #[test]
+    fn test_parse_xml_not_einvoice() {
+        let result = parse_xml_invoice_content("<root>not an invoice</root>");
+        // parse_xml_invoice_content doesn't validate root element; that's done by parse_xml_invoice
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.invoice_no, None);
+    }
+
+    #[test]
+    fn test_parse_xml_issue_time_with_t() {
+        // IssueTime may include time portion with T separator
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<EInvoice>
+  <EInvoiceData>
+    <BasicInformation>
+      <TotalAmWithoutTax>100</TotalAmWithoutTax>
+      <TotalTaxAm>6</TotalTaxAm>
+      <TotalTax-includedAmount>106</TotalTax-includedAmount>
+    </BasicInformation>
+  </EInvoiceData>
+  <TaxSupervisionInfo>
+    <InvoiceNumber>12345</InvoiceNumber>
+    <IssueTime>2026-01-15T10:30:00</IssueTime>
+  </TaxSupervisionInfo>
+</EInvoice>"#;
+
+        let info = parse_xml_invoice_content(xml).unwrap();
+        assert_eq!(info.invoice_date.as_deref(), Some("2026-01-15"));
+    }
 }

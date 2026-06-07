@@ -886,7 +886,7 @@ pub fn read_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
 
-            if !["pdf", "jpg", "jpeg", "png", "bmp", "webp", "tiff", "tif", "ofd"].contains(&ext.as_str()) {
+            if !["pdf", "jpg", "jpeg", "png", "bmp", "webp", "tiff", "tif", "ofd", "xml"].contains(&ext.as_str()) {
                 return None;
             }
 
@@ -895,7 +895,7 @@ pub fn read_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
         })
         .collect();
 
-    // Process OFD files first (sequential, they need ZIP extraction)
+    // Process OFD/XML files first (sequential, they need separate parsing)
     let mut results: Vec<FileData> = Vec::new();
     let mut non_ofd_paths: Vec<(String, String, String, u64)> = Vec::new();
 
@@ -907,6 +907,18 @@ pub fn read_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
             results.push(FileData {
                 name: name.clone(),
                 ext: "ofd".to_string(),
+                size,
+                data_url: String::new(),
+                path: Some(path_str.clone()),
+                orig_w: None,
+                orig_h: None,
+            });
+        } else if ext == "xml" {
+            // Return XML as a single entry with ext="xml" — frontend will call parse_xml_invoice
+            // to extract structured invoice data. XML has no visual layout, no preview image.
+            results.push(FileData {
+                name: name.clone(),
+                ext: "xml".to_string(),
                 size,
                 data_url: String::new(),
                 path: Some(path_str.clone()),
@@ -3200,7 +3212,7 @@ pub fn check_ocr_available() -> bool { true }
 #[cfg(not(feature = "ocr"))]
 pub fn check_ocr_available() -> bool { false }
 
-// OFD code has been extracted to the ofd-engine crate.
+// OFD code has been extracted to the invoice-engine crate.
 
 
 // =====================================================

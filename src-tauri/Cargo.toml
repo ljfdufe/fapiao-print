@@ -38,7 +38,7 @@ encoding_rs = "0.8"
 rayon = "1.10"
 kamadak-exif = "0.5"
 ocr-rs = { version = "2.2", optional = true }
-ofd-engine = { path = "ofd-engine" }
+invoice-engine = { path = "invoice-engine" }
 flate2 = "1.1.9"
 tar = "0.4"
 zip = "2"

@@ -88,8 +88,18 @@ fn open_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
 /// Parse OFD file: returns SVG vector rendering + structured invoice data from XML.
 /// Skips OCR — invoice fields are extracted directly from OFD metadata.
 #[command]
-fn parse_ofd(ofd_path: String) -> Result<ofd_engine::OfdResult, String> {
-    ofd_engine::parse_ofd_file(&ofd_path)
+fn parse_ofd(ofd_path: String) -> Result<invoice_engine::OfdResult, String> {
+    invoice_engine::parse_ofd_file(&ofd_path)
+}
+
+/// Parse standalone XML 数电票 file: extracts structured invoice data.
+/// XML 数电票 is a pure data format with no layout info — cannot be rendered as a visual page.
+/// Used for file list display, summary export, and batch rename.
+#[command]
+async fn parse_xml_invoice(xml_path: String) -> Result<invoice_engine::XmlInvoiceInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        invoice_engine::parse_xml_invoice(&xml_path)
+    }).await.map_err(|e| format!("XML 解析任务失败: {}", e))?
 }
 
 /// Fallback: extract OFD pages as bitmap images (legacy path).
@@ -102,7 +112,7 @@ fn open_ofd_images(ofd_path: String) -> Result<Vec<FileData>, String> {
         .unwrap_or_else(|| "unknown".to_string());
     let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
 
-    let images = ofd_engine::extract_ofd_images_raw(&ofd_path)?;
+    let images = invoice_engine::extract_ofd_images_raw(&ofd_path)?;
     let mut results = Vec::new();
     for (idx, img) in images.iter().enumerate() {
         let base_name = if name.len() > 4 { &name[..name.len()-4] } else { &name };
@@ -1247,7 +1257,7 @@ pub fn run() {
                                     .filter_map(|p| {
                                         let valid_ext = p.extension()
                                             .and_then(|e| e.to_str())
-                                            .map(|e| ["pdf", "jpg", "jpeg", "png", "bmp", "webp", "tiff", "tif", "ofd"].contains(&e.to_lowercase().as_str()))
+                                            .map(|e| ["pdf", "jpg", "jpeg", "png", "bmp", "webp", "tiff", "tif", "ofd", "xml"].contains(&e.to_lowercase().as_str()))
                                             .unwrap_or(false);
                                         if valid_ext { Some(p.to_string_lossy().to_string()) } else { None }
                                     })
@@ -1293,6 +1303,7 @@ pub fn run() {
         generate_pdf_from_layout,
         print_pdf_file,
         parse_ofd,
+        parse_xml_invoice,
         open_ofd_images,
         check_sumatrapdf_available,
         check_pdfium_available,
@@ -1329,6 +1340,7 @@ pub fn run() {
         generate_pdf_from_layout,
         print_pdf_file,
         parse_ofd,
+        parse_xml_invoice,
         open_ofd_images,
         check_sumatrapdf_available,
         check_pdfium_available,
