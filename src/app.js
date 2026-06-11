@@ -2092,6 +2092,7 @@ function syncLayoutHighlight() {
   syncToolbarHighlight(c, r);
 }
 var _printersLoaded = false;
+var _savedPrinterName = null;
 function switchTab(n, el) {
   document.querySelectorAll('.sidebar-tab').forEach(function(t) { t.classList.remove('active'); });
   document.querySelectorAll('.sidebar-panel').forEach(function(p) { p.classList.add('hidden'); });
@@ -2349,6 +2350,7 @@ function saveSettings() {
     colorMode: document.getElementById('colorMode').value,
     pageOrder: document.getElementById('pageOrder').value,
     printMode: document.getElementById('printMode').value,
+    printerName: document.getElementById('printerSel').value || null,
     feat: {}
   };
   var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory','fileListMemory'];
@@ -2448,6 +2450,7 @@ function loadSettings() {
   if (o.colorMode) document.getElementById('colorMode').value = o.colorMode;
   if (o.pageOrder) document.getElementById('pageOrder').value = o.pageOrder;
   if (o.printMode) document.getElementById('printMode').value = o.printMode;
+  if (o.printerName) _savedPrinterName = o.printerName;
   if (o.feat) {
     var featMap = {
       cutline: 'toggleCutline', number: 'toggleNumber', border: 'toggleBorder',

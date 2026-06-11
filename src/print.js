@@ -761,9 +761,17 @@ async function refreshPrinters() {
     var printers = await invoke('get_printers');
     var sel = document.getElementById('printerSel');
     sel.innerHTML = '<option value="">默认打印机</option>';
+    var saved = (typeof _savedPrinterName !== 'undefined') ? _savedPrinterName : null;
+    var found = false;
     printers.forEach(function(p) {
-      sel.innerHTML += '<option value="' + escHtml(p.name) + '" ' + (p.isDefault ? 'selected' : '') + '>' + escHtml(p.name) + (p.isDefault ? ' (默认)' : '') + '</option>';
+      var isSelected = saved && p.name === saved;
+      if (isSelected) found = true;
+      sel.innerHTML += '<option value="' + escHtml(p.name) + '" ' + (isSelected ? 'selected' : '') + '>' + escHtml(p.name) + (p.isDefault ? ' (默认)' : '') + '</option>';
     });
+    if (!found && saved) {
+      // Saved printer no longer available, fall back to default
+      _savedPrinterName = null;
+    }
     toast('已刷新打印机列表');
   } catch(e) { toast('获取打印机列表失败'); }
 }
