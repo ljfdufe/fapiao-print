@@ -2410,9 +2410,7 @@ function saveSettings() {
   if (S.feat.footer) {
     o.footerText = document.getElementById('footerText').value;
   }
-  if (S.feat.customFM || S.feat.pageNum || S.feat.printDate || S.feat.footer) {
-    o.footerMargin = document.getElementById('footerMargin').value;
-  }
+  o.footerMargin = document.getElementById('footerMargin').value;
   if (_summaryActiveCols && _summaryActiveCols.length > 0) {
     o.summaryCols = _summaryActiveCols;
   }
@@ -2511,18 +2509,16 @@ function loadSettings() {
     var lineCount = (S.feat.pageNum || S.feat.printDate ? 1 : 0) + (S.feat.footer ? 1 : 0);
     if (S.feat.customFM && lineCount > 0) {
       document.getElementById('customFMRow').style.display = 'flex';
-      if (o.footerMargin != null) {
-        document.getElementById('footerMargin').value = o.footerMargin;
-        document.getElementById('footerMarginN').value = o.footerMargin;
-      }
       document.getElementById('footerMarginRow').style.display = 'flex';
     } else if (lineCount > 0) {
       document.getElementById('customFMRow').style.display = 'flex';
-      if (o.footerMargin != null) {
-        document.getElementById('footerMargin').value = o.footerMargin;
-        document.getElementById('footerMarginN').value = o.footerMargin;
-      }
     }
+  }
+  // Always restore footerMargin value (even when footer features are off,
+  // so the value is ready when user enables them later)
+  if (o.footerMargin != null) {
+    document.getElementById('footerMargin').value = o.footerMargin;
+    document.getElementById('footerMarginN').value = o.footerMargin;
   }
   // Restore summary table column selection
   if (o.summaryCols && Array.isArray(o.summaryCols) && o.summaryCols.length > 0) {
@@ -2671,6 +2667,9 @@ function resetSettings() {
   try { localStorage.removeItem('ticketchan-ocr-precision'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-pdf-text-enabled'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-settings'); } catch(e) {}
+  _renameTemplate = ['amountTax', 'sellerName', 'invoiceNo'];
+  _renameSeparator = '_';
+  _summaryActiveCols = [];
   _printedMap = {};
   S.printedFilter = 'all';
   document.querySelectorAll('.pf-btn').forEach(function(b) {
