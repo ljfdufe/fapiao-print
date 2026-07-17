@@ -208,6 +208,12 @@ async function doPrint() {
   } else if (printMode === 'pdfium') {
     await doPdfiumPrint(files, s);
   } else if (printMode === 'pdf') {
+    // PDF 阅读器模式通过 ShellExecute printto 委托系统默认 PDF 阅读器打印,
+    // Edge/Chrome 内置查看器不支持 printto 指定打印机,会 fallback 到 print 动词使用系统默认打印机。
+    // 当用户选了具体打印机时提示,引导改用 PDFium 静默打印。
+    if (s.printerName) {
+      toast('PDF阅读器模式可能无法切换打印机,建议改用「静默打印(PDFium)」');
+    }
     await doPdfReaderPrint(files, s);
   } else {
     await doSumatraPrint(files, s);

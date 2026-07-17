@@ -2663,7 +2663,7 @@ function resetSettings() {
   document.getElementById('footerMarginRow').style.display = 'none';
   document.getElementById('footerMargin').value = 8; document.getElementById('footerMarginN').value = 8;
   document.getElementById('ocrPrecision').value = 'standard';
-  document.getElementById('printMode').value = 'pdf';
+  document.getElementById('printMode').value = 'pdfium';
   document.getElementById('themeMode').value = 'light';
   document.documentElement.classList.remove('dark');
   try { localStorage.removeItem('ticketchan-theme'); } catch(e) {}
@@ -2876,7 +2876,8 @@ document.getElementById('orientation').value = 'landscape';
     if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdfium' || pm === 'pdf')) {
       document.getElementById('printMode').value = pm;
     } else {
-      document.getElementById('printMode').value = 'pdf';
+      // 默认 PDFium 静默打印 — PDF 阅读器模式无法可靠切换打印机(Edge/Chrome 内置查看器不支持 printto)
+      document.getElementById('printMode').value = 'pdfium';
     }
   } catch(e) {}
 })();
