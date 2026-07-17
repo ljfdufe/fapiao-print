@@ -1909,25 +1909,38 @@ function _crossValidateBuyerSeller(result, words) {
   if (!words || words.length === 0) return;
 
   // Helper: find the word matching a given text, returns its nx (normalized x)
+  // Match priority: exact > suffix-ending (company names) > contains (long text only)
+  // Short text (< 4 chars) skips "contains" to avoid false matches like "中国" → "中国银行"
   function _findWordNx(text) {
     if (!text) return null;
     var _clean = String(text).trim();
     if (!_clean) return null;
-    // Try exact match first, then "contains" match (handles prefix/suffix noise)
-    var exact = null, contains = null;
+    var exact = null, suffixMatch = null, contains = null;
+    // Company suffix pattern — when looking up a company name, prefer words that
+    // END with a suffix (完整公司名) over partial matches
+    var _hasSuffix = /(?:公司|集团|商行|商店|厂|部|院|所|中心|店|馆|站|社|行|会|处|室|局|办|坊|铺|有限合伙|合伙企业|个体工商户|个体户|工作室|经营部|门市部|分公司|事业部|事务所|医院|学校|幼儿园|合作社|企业|商社|贸易行|服务部)$/.test(_clean);
     for (var i = 0; i < words.length; i++) {
       var wt = (words[i].text || '').trim();
       var wn = (words[i].normText || '').trim();
+      // Priority 1: exact match
       if (wt === _clean || wn === _clean) { exact = words[i].nx; break; }
-      if (contains === null && (wt.indexOf(_clean) >= 0 || wn.indexOf(_clean) >= 0)) {
+      // Priority 2: word ends with the target text AND target has a company suffix
+      // (e.g., target="无锡市某某公司", word="名称:无锡市某某公司" → match)
+      if (suffixMatch === null && _hasSuffix &&
+          (wt.endsWith(_clean) || wn.endsWith(_clean)) && _clean.length >= 4) {
+        suffixMatch = words[i].nx;
+      }
+      // Priority 3: contains match (only for longer text to avoid false positives)
+      if (contains === null && _clean.length >= 4 &&
+          (wt.indexOf(_clean) >= 0 || wn.indexOf(_clean) >= 0)) {
         contains = words[i].nx;
       }
     }
-    return exact !== null ? exact : contains;
+    return exact !== null ? exact : (suffixMatch !== null ? suffixMatch : contains);
   }
 
   // --- Rule 2: position-based swap detection for names ---
-  // Standard VAT layout: buyer on LEFT (nx < 0.5), seller on RIGHT (nx >= 0.5)
+  // Standard VAT layout: buyer on LEFT, seller on RIGHT (boundary is dynamic, see _getSideBoundary)
   // If seller's nx is clearly less than buyer's nx (margin > 0.15), they're swapped.
   // Margin 0.15 ~ 15% of page width, avoids false swaps for names near the center.
   var MARGIN = 0.15;
@@ -1955,15 +1968,17 @@ function _crossValidateBuyerSeller(result, words) {
   }
 
   // --- Rule 4: anchor credit code position → fix name side when only one is wrong ---
-  // If sellerCreditCode is on the RIGHT (correct side) but sellerName is missing,
-  // and buyerName is on the RIGHT side (wrong), buyerName is likely the real seller.
+  // If sellerCreditCode is on the seller side (correct) but sellerName is missing,
+  // and buyerName is on the seller side too (wrong), buyerName is likely the real seller.
   // This catches the case where buyer was mis-extracted but seller code provides truth.
+  // Proximity threshold is relaxed (MARGIN * 2 = 0.3) because the "名称：" label is shorter
+  // than "统一社会信用代码/纳税人识别号：", so the value start x may differ by ~10-20%.
   if (result.sellerCreditCode && !result.sellerName && result.buyerName) {
     var sCcNx2 = _findWordNx(result.sellerCreditCode);
     var bNx2 = _findWordNx(result.buyerName);
     // Use dynamic boundary (v2.1.1) instead of fixed 0.5 for side determination
     var _rule4Bound = _getSideBoundary(words);
-    if (sCcNx2 !== null && bNx2 !== null && Math.abs(sCcNx2 - bNx2) < MARGIN && sCcNx2 >= _rule4Bound) {
+    if (sCcNx2 !== null && bNx2 !== null && Math.abs(sCcNx2 - bNx2) < MARGIN * 2 && sCcNx2 >= _rule4Bound) {
       // buyerName sits at the same x as sellerCreditCode (seller side) → buyerName is actually seller
       console.log('[交叉验证] buyerName 实为销售方（与 sellerCreditCode 同侧），迁移');
       result.sellerName = result.buyerName;
