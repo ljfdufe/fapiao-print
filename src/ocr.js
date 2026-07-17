@@ -1368,7 +1368,8 @@ function _extractNamesByCoords(words, result) {
       var isRightOfLabel = w.x >= label.x - lineH * 0.3;
       // For seller-side labels, also look slightly ABOVE (some ride invoices have
       // the company name above the "名称：" label when layout is compact)
-      var isBelowOrSameLine = w.y >= label.y - lineH * 0.3 && w.y < labelBottom + lineH * 3;
+      // Y range收紧: 3倍行高 → 2倍行高,避免收集到分页信息"共1页 第1页"
+      var isBelowOrSameLine = w.y >= label.y - lineH * 0.3 && w.y < labelBottom + lineH * 2;
       var isAboveLabel = w.y >= label.y - lineH * 5 && w.y < label.y - lineH * 0.3;
       // Only look above for right-side labels (seller) — buyer labels should only look below
       var includeAbove = !isLeftSide && isAboveLabel && w.x >= label.x - lineH * 2;
@@ -1376,6 +1377,8 @@ function _extractNamesByCoords(words, result) {
       var isNotLabel = !/^名\s*称\s*[:：]/.test(w.text) && !/^名\s*称\s*[:：]/.test(w.normText);
       var isNotCreditLabel = !/统一社会(?:信用代码)?|纳税人识别号/.test(w.text) && !/统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
       var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.normText);
+      // Filter out pagination info ("共1页", "第1页", "共 N 页 第 M 页")
+      var isNotPagination = !/^(?:共\s*\d+\s*页|第\s*\d+\s*页)/.test(w.text) && !/^(?:共\s*\d+\s*页|第\s*\d+\s*页)/.test(w.normText);
       // Filter out metadata/watermark words (download count, verification count, etc.)
       var isNotMetadata = !/^(?:下载|查验|开具|打印)次数/.test(w.text) && !/^(?:下载|查验|开具|打印)次数/.test(w.normText);
       // Filter out words that look like credit codes (18-char alphanumeric with letters)
@@ -1383,7 +1386,7 @@ function _extractNamesByCoords(words, result) {
       var _wCleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
       var isNotCreditCodeWord = !(_wCleaned.length >= 15 && _wCleaned.length <= 20 && /^[0-9]/.test(_wCleaned) && /[A-Z]/.test(_wCleaned));
 
-      if (isRightOfLabel && isInYRange && isNotLabel && isNotCreditLabel && isNotSectionLabel && isNotMetadata && isNotCreditCodeWord) {
+      if (isRightOfLabel && isInYRange && isNotLabel && isNotCreditLabel && isNotSectionLabel && isNotPagination && isNotMetadata && isNotCreditCodeWord) {
         var blockedByCredit = false;
         for (var ci = 0; ci < creditLabels.length; ci++) {
           var cl = creditLabels[ci];
@@ -1890,6 +1893,7 @@ function _extractByText(fullText, words) {
   // Fallback: if cross-validation cleared sellerName (e.g., Rule 1 detected duplicate),
   // Priority 2-6 already ran and won't retry. Re-extract from company-name suffix matches,
   // excluding the buyerName to avoid re-duplicating.
+  // 最小长度6字: 避免匹配到"有限公司"这种纯后缀片段
   if (!result.sellerName && result.buyerName) {
     var _csSuffixFb = '(?:公司|集团|商行|商店|厂|部|院|所|中心|店|馆|站|社|行|会|处|室|局|办|坊|铺|有限合伙|合伙企业|个体工商户|个体户|工作室|经营部|门市部|分公司|事业部|事务所|医院|学校|幼儿园|合作社|企业|商社|贸易行|服务部)';
     var _allCompReFb = new RegExp('([\\u4e00-\\u9fff][\\u4e00-\\u9fff\\w（）()·\\-\\.]' + _csSuffixFb + ')', 'g');
@@ -1897,7 +1901,10 @@ function _extractByText(fullText, words) {
     var _fcm;
     while ((_fcm = _allCompReFb.exec(text)) !== null) {
       var _fcn = _fcm[1].trim();
-      if (_fcn.length > 3 && _fcn !== result.buyerName &&
+      // 最小长度6字(如"无锡天鹏菜篮子工程有限公司"),排除纯后缀如"有限公司"
+      // 同时排除buyerName及其子串,避免重复
+      if (_fcn.length >= 6 && _fcn !== result.buyerName &&
+          !result.buyerName.includes(_fcn) && !_fcn.includes(result.buyerName) &&
           !/^(?:购买方|销售方|信息|名称|地址)/.test(_fcn)) {
         _fbMatches.push(_fcn);
       }
