@@ -321,10 +321,15 @@ function cleanOcrAmtStr(raw) {
  * Returns true if the value looks like a year/date, false otherwise.
  */
 function isLikelyYearOrDate(val, rawText) {
-  // Integer part in year range (1900-2099) and value < 2100 → almost certainly a year
-  if (val >= 1900 && val < 2100) return true;
-  // Check raw text for year-like pattern: "20XX.XX" where XX could be month
-  if (rawText && /^-?¥?(20\d{2})\.\d{2}$/.test(rawText)) return true;
+  // ¥-prefixed values are always amounts, never dates
+  if (rawText && /^[¥·•]/.test(rawText.trim())) return false;
+  // Pure integer in year range (1900-2099) without decimal → year
+  // "2000.00" has decimal → amount (¥2000.00), not year 2000
+  if (val >= 1900 && val < 2100 && Number.isInteger(val) &&
+      !(rawText && /\.\d{2}$/.test(rawText))) return true;
+  // "20XX.0X" or "20XX.1X" where XX is 01-12 → date (year.month)
+  // But NOT ".00" — that's an amount (e.g., ¥2000.00)
+  if (rawText && /^-?(20\d{2})\.(0[1-9]|1[0-2])$/.test(rawText)) return true;
   return false;
 }
 
