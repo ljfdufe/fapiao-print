@@ -136,14 +136,49 @@ jobs:
             Write-Host "  $($_.Name)  ($sizeMB MB)"
           }
 
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          # 从 CHANGELOG.md 提取当前 tag 对应段落作为 Release body
+          $tag = "${{ github.ref_name }}"
+          Write-Host "Extracting release notes for tag: $tag"
+          $lines = Get-Content CHANGELOG.md -Encoding UTF8
+          $capturing = $false
+          $bodyLines = @()
+          foreach ($line in $lines) {
+            if ($line -match "^## $tag\b") {
+              $capturing = $true
+              $bodyLines += $line
+              continue
+            }
+            if ($capturing) {
+              # 遇到分隔线 --- 表示本段结束
+              if ($line -match "^---\s*$") { break }
+              # 遇到下一个版本标题也表示结束
+              if ($line -match "^## v") { break }
+              $bodyLines += $line
+            }
+          }
+          $body = $bodyLines -join "`n"
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $body = "See [CHANGELOG](https://github.com/erma0/fapiao-print/blob/master/CHANGELOG.md) for details."
+          } else {
+            # 末尾追加 CHANGELOG 链接
+            $body = $body + "`n`n---`n详见 [CHANGELOG](https://github.com/erma0/fapiao-print/blob/master/CHANGELOG.md)"
+          }
+          # 写入文件供 release action 使用
+          $body | Out-File -FilePath release_body.txt -Encoding UTF8 -NoNewline
+          Write-Host "`n=== Release Body Preview ==="
+          Write-Host $body
+
       - name: Create Release & Upload
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: |
-            See [CHANGELOG](https://github.com/erma0/fapiao-print/blob/master/CHANGELOG.md) for details.
+          body_path: release_body.txt
           draft: false
           prerelease: false
           files: dist/*

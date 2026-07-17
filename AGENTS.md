@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v2.0.8
+- **版本**: v2.1.0
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -105,6 +105,22 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **自动标记**: 四种打印模式成功后自动 `markFilesAsPrinted()` → 绿色 ✓ 标识
 - **持久化**: `_printedMap` 始终保存到 localStorage，不受功能开关影响
 - **迁移**: `clearAll()` / `executeRename()` / `resetSettings()` 均正确迁移打印状态 key
+
+### 版本号显示与检查更新 (v2.1.0)
+
+利用 GitHub Release 作为更新源，启动时自动检查 + 手动触发检查双模式。
+
+- **后端命令**: `check_for_updates` — `async fn` + `reqwest` 调用 GitHub Releases API (`/repos/erma0/fapiao-print/releases/latest`)，不阻塞 IPC 线程
+- **版本比较**: `compare_versions(a, b)` 语义化版本比较函数（`-1/0/1`），`tag_name` 自动去 `v` 前缀
+- **返回结构**: `UpdateInfo { has_update, current_version, latest_version, release_notes, release_url, published_at, assets[] }`
+- **启动自动检查**: `showApp()` 中 `get_app_version` 完成后 5 秒触发 `checkForUpdates(true)` 静默检查
+- **1 小时缓存**: `ticketchan-update-cache` localStorage，避免触发 GitHub API 速率限制（未认证 60次/小时）；手动检查绕过缓存
+- **手动检查入口**:
+  - 状态栏 `#stVersion` 版本号可点击（hover 变蓝）→ `checkForUpdates(false)`
+  - 设置面板「ℹ 关于」板块的「🔄 检查更新」按钮 → `checkForUpdates(false)`
+- **更新弹窗** `#updateModal`: 版本对比行（旧→新）、发布日期、更新说明（HTML 转义 + `\n`→`<br>`）、资源列表（点击调 `open_url` 浏览器打开下载链接）
+- **Release Notes 自动填充**: `.github/workflows/build.yml` 的「Extract release notes from CHANGELOG」步骤从 CHANGELOG.md 提取 `## v<tag>` 到下一个 `---` 之间的段落，写入 `release_body.txt` 供 `softprops/action-gh-release@v2` 的 `body_path` 使用
+- **未使用 Tauri Updater**: 本项目 4 产物（轻量/OCR × setup/绿色版）+ 无代码签名证书，引导用户去 Release 页自主选择更合适
 
 ### PDF 文字层提取 (v1.9.4+ / 批量 v1.10.5)
 

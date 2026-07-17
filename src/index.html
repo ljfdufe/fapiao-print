@@ -274,6 +274,13 @@
           <div class="sec-title">🎨 外观</div>
           <div class="row"><label class="lbl">主题</label><div class="ctrl"><select id="themeMode" onchange="applyTheme()"><option value="light">浅色</option><option value="dark">深色</option></select></div></div>
         </div>
+        <div class="sec">
+          <div class="sec-title">ℹ 关于</div>
+          <div class="about-row"><span class="about-label">当前版本</span><span class="about-value" id="prefsCurrentVersion">v—</span></div>
+          <div class="about-row"><span class="about-label">更新源</span><span class="about-value">GitHub Release</span></div>
+          <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="checkForUpdates(false)">🔄 检查更新</button>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">启动时自动检查更新（每小时最多一次）。发现新版本时弹出提示，可前往 GitHub 下载。</div>
+        </div>
       </div>
       <div class="sidebar-panel-footer">
         <div class="sec" style="border-bottom:0">
@@ -362,6 +369,28 @@
 
 <!-- Print confirm modal -->
 <div class="modal-bg hidden" id="printConfirmModal" onclick="closePrintConfirm()"><div class="modal print-confirm-modal" onclick="event.stopPropagation()"><div class="modal-title">🖨 确认打印</div><div class="modal-body" id="printConfirmBody"></div><div class="modal-actions"><button class="btn" onclick="closePrintConfirm()">取消</button><button class="btn btn-success" id="printConfirmBtn" onclick="confirmPrint()">确认打印</button></div></div></div>
+
+<!-- Update available modal -->
+<div class="modal-bg hidden" id="updateModal" onclick="closeUpdateModal()">
+  <div class="modal update-modal" onclick="event.stopPropagation()">
+    <div class="modal-title">🆕 发现新版本</div>
+    <div class="modal-body">
+      <div class="update-version-row">
+        <span class="update-ver-old" id="updateCurrentVersion">v—</span>
+        <span class="update-arrow">→</span>
+        <span class="update-ver-new" id="updateLatestVersion">v—</span>
+      </div>
+      <div class="update-date">发布日期：<span id="updatePubDate">—</span></div>
+      <div class="update-section-title">更新内容</div>
+      <div class="update-notes" id="updateNotes"></div>
+      <div id="updateAssets"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeUpdateModal()">稍后再说</button>
+      <button class="btn btn-primary" id="updateOpenBtn">前往 GitHub 下载</button>
+    </div>
+  </div>
+</div>
 
 <!-- Summary table modal -->
 <div class="modal-bg hidden" id="summaryModal" onclick="closeSummaryModal()">

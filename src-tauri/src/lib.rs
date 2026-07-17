@@ -387,6 +387,102 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// =====================================================
+// Update Check — fetch latest release from GitHub
+// =====================================================
+
+#[derive(serde::Serialize)]
+struct UpdateAsset {
+    name: String,
+    download_url: String,
+    size: u64,
+}
+
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    has_update: bool,
+    current_version: String,
+    latest_version: String,
+    release_notes: String,
+    release_url: String,
+    published_at: String,
+    assets: Vec<UpdateAsset>,
+}
+
+/// Compare two semver-like version strings (e.g. "2.0.9" vs "2.1.0").
+/// Returns -1 if a < b, 0 if equal, 1 if a > b.
+fn compare_versions(a: &str, b: &str) -> i32 {
+    let pa: Vec<u32> = a.split('.').filter_map(|s| s.parse().ok()).collect();
+    let pb: Vec<u32> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+    let n = std::cmp::max(pa.len(), pb.len());
+    for i in 0..n {
+        let va = *pa.get(i).unwrap_or(&0);
+        let vb = *pb.get(i).unwrap_or(&0);
+        if va < vb { return -1; }
+        if va > vb { return 1; }
+    }
+    0
+}
+
+/// Check for updates by querying GitHub Releases API (latest release).
+/// Returns update info including latest version, release notes, and download assets.
+/// Uses async reqwest to avoid blocking the IPC thread.
+#[command]
+async fn check_for_updates() -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+
+    let resp = client
+        .get("https://api.github.com/repos/erma0/fapiao-print/releases/latest")
+        .header("User-Agent", "ticketchan-updater")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("请求GitHub失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API返回状态: {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    let tag = json["tag_name"].as_str().unwrap_or("").to_string();
+    let latest = tag.trim_start_matches('v').to_string();
+    let release_notes = json["body"].as_str().unwrap_or("").to_string();
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
+    let published_at = json["published_at"].as_str().unwrap_or("").to_string();
+
+    let mut assets = Vec::new();
+    if let Some(arr) = json["assets"].as_array() {
+        for a in arr {
+            assets.push(UpdateAsset {
+                name: a["name"].as_str().unwrap_or("").to_string(),
+                download_url: a["browser_download_url"].as_str().unwrap_or("").to_string(),
+                size: a["size"].as_u64().unwrap_or(0),
+            });
+        }
+    }
+
+    let has_update = compare_versions(&current, &latest) < 0;
+
+    Ok(UpdateInfo {
+        has_update,
+        current_version: current,
+        latest_version: latest,
+        release_notes,
+        release_url,
+        published_at,
+        assets,
+    })
+}
+
 /// Get backend configuration (for runtime DPI validation)
 #[command]
 fn get_config() -> Result<serde_json::Value, String> {
@@ -1313,6 +1409,7 @@ pub fn run() {
         download_pdfium_dll,
         download_sumatrapdf,
         sumatrapdf_print,
+        check_for_updates,
     ]);
 
     #[cfg(not(feature = "ocr"))]
@@ -1350,6 +1447,7 @@ pub fn run() {
         download_pdfium_dll,
         download_sumatrapdf,
         sumatrapdf_print,
+        check_for_updates,
     ]);
 
     builder
