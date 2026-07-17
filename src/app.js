@@ -2953,8 +2953,18 @@ loadSettings();
       invoke('get_app_version').then(function(v) {
         APP_VERSION = v;
         var el = document.getElementById('stVersion');
-        if (el) el.textContent = 'v' + v;
+        if (el) {
+          el.innerHTML = 'v' + v + ' <span class="ver-check">🔄 检查更新</span>';
+          el.style.cursor = 'pointer';
+          el.title = '点击检查更新';
+          el.onclick = function() { checkForUpdates(false); };
+        }
+        // Update version display in prefs panel too
+        var pv = document.getElementById('prefsCurrentVersion');
+        if (pv) pv.textContent = 'v' + v;
         console.log('发票酱 v' + v + ' | isTauri:', isTauri);
+        // Auto-check for updates 5s after startup (silent — only shows modal if update exists)
+        setTimeout(function() { checkForUpdates(true); }, 5000);
       }).catch(function() {});
       try { invoke('show_window'); } catch(e) {}
       // Restore file list from last session if memory is enabled
@@ -2976,6 +2986,135 @@ loadSettings();
   }
   setTimeout(showApp, 2000);
 })();
+
+// =====================================================
+// 更新检查 — GitHub Release
+// =====================================================
+
+var _UPDATE_CACHE_KEY = 'ticketchan-update-cache';
+var _UPDATE_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+var _updateChecking = false;
+
+/**
+ * Check for updates via GitHub Releases API.
+ * @param {boolean} silent — silent mode (auto-check): only show modal if update is available,
+ *                           and use cached result to avoid hitting GitHub rate limits.
+ *                           Manual click (silent=false) always bypasses cache.
+ */
+function checkForUpdates(silent) {
+  if (!isTauri || !invoke) return;
+  if (_updateChecking) return;
+  _updateChecking = true;
+
+  // Silent auto-check: respect cache TTL to avoid rate limits
+  if (silent) {
+    try {
+      var cached = localStorage.getItem(_UPDATE_CACHE_KEY);
+      if (cached) {
+        var data = JSON.parse(cached);
+        if (Date.now() - data.ts < _UPDATE_CACHE_TTL) {
+          _updateChecking = false;
+          if (data.info && data.info.has_update) {
+            showUpdateModal(data.info);
+          }
+          return;
+        }
+      }
+    } catch(e) {}
+  }
+
+  if (!silent) toast('正在检查更新...', 1500);
+
+  invoke('check_for_updates').then(function(info) {
+    _updateChecking = false;
+    // Cache result for silent auto-check
+    try {
+      localStorage.setItem(_UPDATE_CACHE_KEY, JSON.stringify({ ts: Date.now(), info: info }));
+    } catch(e) {}
+
+    if (info.has_update) {
+      showUpdateModal(info);
+    } else if (!silent) {
+      toast('已是最新版本 v' + info.current_version, 2500);
+    }
+  }).catch(function(err) {
+    _updateChecking = false;
+    if (!silent) toast('检查更新失败: ' + err, 4000);
+    console.warn('[Update] check failed:', err);
+  });
+}
+
+/**
+ * Render the update modal with release info.
+ */
+function showUpdateModal(info) {
+  var modal = document.getElementById('updateModal');
+  if (!modal) return;
+
+  document.getElementById('updateCurrentVersion').textContent = 'v' + info.current_version;
+  document.getElementById('updateLatestVersion').textContent = 'v' + info.latest_version;
+
+  var dateStr = '';
+  if (info.published_at) {
+    try {
+      var d = new Date(info.published_at);
+      dateStr = d.toLocaleDateString('zh-CN');
+    } catch(e) { dateStr = info.published_at; }
+  }
+  document.getElementById('updatePubDate').textContent = dateStr;
+
+  // Release notes — escape HTML then convert basic markdown
+  var notes = info.release_notes || '（无更新说明）';
+  var escaped = notes
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n/g, '<br>');
+  document.getElementById('updateNotes').innerHTML = escaped;
+
+  // Build asset list (download links)
+  var assetsHtml = '';
+  if (info.assets && info.assets.length) {
+    assetsHtml = '<div class="update-assets-title">下载文件：</div><ul class="update-assets">';
+    info.assets.forEach(function(a) {
+      var sizeStr = a.size > 1048576
+        ? (a.size / 1048576).toFixed(1) + ' MB'
+        : a.size > 1024
+          ? (a.size / 1024).toFixed(0) + ' KB'
+          : a.size + ' B';
+      assetsHtml += '<li class="update-asset" onclick="openUpdateAsset(\'' + a.download_url.replace(/'/g, "\\'") + '\')">' +
+        '<span class="update-asset-name">📥 ' + a.name + '</span>' +
+        '<span class="update-asset-size">' + sizeStr + '</span></li>';
+    });
+    assetsHtml += '</ul>';
+  }
+  document.getElementById('updateAssets').innerHTML = assetsHtml;
+
+  // Open release page button
+  var openBtn = document.getElementById('updateOpenBtn');
+  if (openBtn) {
+    openBtn.onclick = function() {
+      if (info.release_url && isTauri && invoke) {
+        invoke('open_url', { url: info.release_url }).catch(function(){});
+      }
+    };
+  }
+
+  modal.classList.remove('hidden');
+}
+
+function closeUpdateModal() {
+  var modal = document.getElementById('updateModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+// Asset list click → open download URL in browser
+function openUpdateAsset(url) {
+  if (isTauri && invoke) {
+    invoke('open_url', { url: url }).catch(function(){});
+  }
+}
 
 // =====================================================
 // 发票汇总表 — 可编辑预览 + CSV 导出

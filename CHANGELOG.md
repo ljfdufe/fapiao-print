@@ -1,5 +1,28 @@
 # 📋 更新日志
 
+## v2.1.0 — 版本号显示 + 检查更新功能
+
+### 🔄 检查更新（GitHub Release）
+
+- **后端命令**：`check_for_updates` 调用 GitHub Releases API 查询最新版本，`async fn` + `reqwest` 不阻塞 IPC 线程
+- **版本比较**：`compare_versions` 语义化版本比较函数，支持 `v2.1.0` tag 自动去除 `v` 前缀
+- **返回结构**：`UpdateInfo` 包含当前版本、最新版本、是否有更新、更新说明、发布日期、Release 链接、下载资源列表
+- **启动自动检查**：应用启动 5 秒后静默检查，发现新版本自动弹窗
+- **1 小时缓存**：静默模式带 `ticketchan-update-cache` localStorage 缓存，避免触发 GitHub API 速率限制（未认证 60次/小时）
+- **手动检查**：状态栏版本号可点击 / 设置面板「🔄 检查更新」按钮，绕过缓存立即查询
+- **更新弹窗**：版本对比（旧 → 新）、发布日期、更新说明（自动转义 HTML）、可下载资源列表（点击调 `open_url` 在浏览器打开）
+- **CI 自动填充 Release Notes**：GitHub Actions 从 CHANGELOG.md 提取当前 tag 对应段落作为 Release body，无需手动填写
+
+### ℹ 关于面板
+
+- 设置面板新增「ℹ 关于」板块，显示当前版本号 + 更新源信息 + 检查更新按钮
+
+### 🐛 修复
+
+- README.md / AGENTS.md 版本号同步到 v2.1.0（之前停留在 v2.0.8）
+
+---
+
 ## v2.0.8 — 单票调整增强 + 列表排序 + 修复
 
 ### 🎯 单票调整增强
