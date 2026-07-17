@@ -448,9 +448,11 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
         return Err(format!("GitHub API返回状态: {}", resp.status()));
     }
 
-    let json: serde_json::Value = resp
-        .json()
+    let body = resp
+        .text()
         .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| format!("解析响应失败: {}", e))?;
 
     let tag = json["tag_name"].as_str().unwrap_or("").to_string();
