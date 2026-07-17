@@ -766,9 +766,17 @@ function _cleanName(raw) {
   name = name.replace(/银行账号.*$/, '');
   name = name.replace(/地址电话.*$/, '');
   // Strip metadata/watermark annotations (download count, verification count, etc.)
-  name = name.replace(/(?:下载|查验|开具|打印)次数[：:]*\d*/g, '');
-  // Remove trailing punctuation and whitespace
-  name = name.replace(/[，,。.、：:；;！!？?\s]+$/, '');
+    name = name.replace(/(?:下载|查验|开具|打印)次数[：:]*\d*/g, '');
+    // Strip date patterns — PDF text layer may place date fragments (2025/年/02/月/24/日)
+    // near name labels because content stream order ≠ visual order. Region-based extraction
+    // collects these fragments and joins them into the name field.
+    name = name.replace(/\d{4}年\d{1,2}月\d{1,2}日/g, '');
+    name = name.replace(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g, '');
+    name = name.replace(/\d{1,2}月\d{1,2}日/g, '');
+    // Reject if name is primarily a date fragment (digits + 年月日/-) with no real company name
+    if (/^[\d年月日\-/\s]+$/.test(name)) return '';
+    // Remove trailing punctuation and whitespace
+    name = name.replace(/[，,。.、：:；;！!？?\s]+$/, '');
   // Remove leading whitespace/colons
   name = name.replace(/^[\s:：]+/, '');
   // Skip if it's a label itself or non-company text
