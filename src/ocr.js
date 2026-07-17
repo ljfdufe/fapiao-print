@@ -1058,11 +1058,12 @@ function _determineLabelSide(label, words) {
       var w = words[i];
       var t = w.text || '';
       var nt = w.normText || '';
-      if (/^购\s*买\s*方/.test(t) || /^购\s*买\s*方/.test(nt)) {
+      // 精确匹配"购买方"/"销售方",不能是"购买方地址"/"购方开户银行"等
+      if (/^购\s*买\s*方(?:信息)?$/.test(t) || /^购\s*买\s*方(?:信息)?$/.test(nt)) {
         buyerHeaders.push(w);
         continue;
       }
-      if (/^销\s*售\s*方/.test(t) || /^销\s*售\s*方/.test(nt)) {
+      if (/^销\s*售\s*方(?:信息)?$/.test(t) || /^销\s*售\s*方(?:信息)?$/.test(nt)) {
         sellerHeaders.push(w);
         continue;
       }
@@ -1077,38 +1078,21 @@ function _determineLabelSide(label, words) {
       var xiaoWords = words.filter(function(w) {
         return (w.text === '销' || w.normText === '销') && w.w < w.h * 3;
       });
-      for (var gi = 0; gi < gouWords.length; gi++) {
-        var gw = gouWords[gi];
-        var maiWords = words.filter(function(w) {
-          return (w.text === '买' || w.normText === '买') && w.w < w.h * 3 &&
-                 Math.abs(w.y - gw.y) <= gw.h * 0.5 && w.x >= gw.x - gw.h * 0.5 && w.x <= gw.x + gw.w * 3;
-        });
-        if (maiWords.length === 0) continue;
-        var mw = maiWords[0];
-        var fangWords = words.filter(function(w) {
-          return (w.text === '方' || w.normText === '方') && w.w < w.h * 3 &&
-                 Math.abs(w.y - mw.y) <= mw.h * 0.5 && w.x >= mw.x - mw.h * 0.5 && w.x <= mw.x + mw.w * 3;
-        });
-        if (fangWords.length > 0) {
-          buyerHeaders.push(gw);
-          break;
-        }
-      }
-      for (var xi = 0; xi < xiaoWords.length; xi++) {
-        var xw = xiaoWords[xi];
-        var shouWords = words.filter(function(w) {
-          return (w.text === '售' || w.normText === '售') && w.w < w.h * 3 &&
-                 Math.abs(w.y - xw.y) <= xw.h * 0.5 && w.x >= xw.x - xw.h * 0.5 && w.x <= xw.x + xw.w * 3;
-        });
-        if (shouWords.length === 0) continue;
-        var sw = shouWords[0];
-        var fangWords2 = words.filter(function(w) {
-          return (w.text === '方' || w.normText === '方') && w.w < w.h * 3 &&
-                 Math.abs(w.y - sw.y) <= sw.h * 0.5 && w.x >= sw.x - sw.h * 0.5 && w.x <= sw.x + sw.w * 3;
-        });
-        if (fangWords2.length > 0) {
-          sellerHeaders.push(xw);
-          break;
+      // 直接用"购"的nx作为buyer表头,"销"的nx作为seller表头
+      // 内容流顺序可能混乱(购...销...买...售...方),但每个字的nx坐标是稳定的
+      // 之前的连续性检测(买在购右侧、方在买右侧)在内容流顺序乱时会失败
+      if (gouWords.length > 0) buyerHeaders.push(gouWords[0]);
+      if (xiaoWords.length > 0) sellerHeaders.push(xiaoWords[0]);
+      // 竖排布局检测: "购"和"销"的nx相同(都在左侧纵向栏),不能用nx区分购销方
+      // 此时清空表头,回退到0.5边界判定(两个"名称:"标签靠y坐标区分,不在同侧region收集)
+      if (buyerHeaders.length > 0 && sellerHeaders.length > 0) {
+        var _gNx = buyerHeaders[0].nx;
+        var _xNx = sellerHeaders[0].nx;
+        if (Math.abs(_gNx - _xNx) < 0.05) {
+          // 竖排布局: "购"和"销"的nx相同(都在左侧纵向栏),不能用nx区分购销方
+          // 清空表头,回退到0.5边界判定(两个"名称:"标签靠y坐标区分,不在同侧region收集)
+          buyerHeaders = [];
+          sellerHeaders = [];
         }
       }
     }
@@ -1197,7 +1181,6 @@ function _extractNamesByCoords(words, result) {
     var chengWords = words.filter(function(w) {
       return (w.text === '称' || w.normText === '称') && w.w < w.h * 3;
     });
-    console.log('[名称虚拟标签] "名"字词数:', mingWords.length, '"称"字词数:', chengWords.length);
     for (var mi = 0; mi < mingWords.length; mi++) {
       var mw = mingWords[mi];
       for (var ci = 0; ci < chengWords.length; ci++) {
@@ -1378,15 +1361,30 @@ function _extractNamesByCoords(words, result) {
       var isNotCreditLabel = !/统一社会(?:信用代码)?|纳税人识别号/.test(w.text) && !/统一社会(?:信用代码)?|纳税人识别号/.test(w.normText);
       var isNotSectionLabel = !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.text) && !/^(?:购\s*买|销\s*售|购|销|买|售|信\s*息|方|项\s*目|项目名称|单\s*价|数\s*量|金\s*额|税\s*率|税\s*额|合\s*计|备\s*注|开\s*票|收\s*款|复\s*核|出\s*行|等\s*级|交\s*通|名|称)$/.test(w.normText);
       // Filter out pagination info ("共1页", "第1页", "共 N 页 第 M 页")
-      var isNotPagination = !/^(?:共\s*\d+\s*页|第\s*\d+\s*页)/.test(w.text) && !/^(?:共\s*\d+\s*页|第\s*\d+\s*页)/.test(w.normText);
+      // 单字也要过滤:"共"/"第"/"页"在内容流顺序混乱时可能独立出现
+      var isNotPagination = !/^(?:共\s*\d+\s*页|第\s*\d+\s*页|共|第|页)$/.test(w.text) && !/^(?:共\s*\d+\s*页|第\s*\d+\s*页|共|第|页)$/.test(w.normText);
+      // Filter out date fragments: "2025"/"年"/"02"/"月"/"24"/"日" 在内容流顺序混乱时
+      // 可能被错误地收集到名称region。过滤纯年份(1900-2100)、月日数字、年月日单字、完整日期词
+      var _wTrimmed = (w.text || '').trim();
+      var isNotDateFragment = !(/^(\d{4}|年|月|日|\d{1,2})$/.test(_wTrimmed) && (/(年|月|日)/.test(_wTrimmed) || /^\d+$/.test(_wTrimmed)));
+      // 过滤完整日期词: "2026年03月04日" / "2026-03-04" / "2026/03/04"
+      // 这些词在 region 收集时可能被错误地拼接到名称前缀(多后缀拆分会从"年"开始匹配)
+      var isNotFullDate = !/^\d{4}年\d{1,2}月\d{1,2}日$/.test(_wTrimmed) &&
+                          !/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(_wTrimmed);
       // Filter out metadata/watermark words (download count, verification count, etc.)
       var isNotMetadata = !/^(?:下载|查验|开具|打印)次数/.test(w.text) && !/^(?:下载|查验|开具|打印)次数/.test(w.normText);
       // Filter out words that look like credit codes (18-char alphanumeric with letters)
       // These should be captured as credit codes, not as part of company names
       var _wCleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
       var isNotCreditCodeWord = !(_wCleaned.length >= 15 && _wCleaned.length <= 20 && /^[0-9]/.test(_wCleaned) && /[A-Z]/.test(_wCleaned));
+      // 过滤信用代码 CJK 拆字的单字字母/数字(如 'A' 'X' 'W' '1' '2' 等)
+      // 信用代码被拆成18个单字时,数字已被 isNotDateFragment 过滤,但字母未被过滤
+      // 单字字母不可能是公司名的一部分,直接过滤
+      var isNotCcSingleChar = !(_wTrimmed.length === 1 && /[A-Za-z0-9]/.test(_wTrimmed));
+      // 过滤纯空格词(内容流顺序混乱时可能独立出现)
+      var isNotWhitespace = !/^\s*$/.test(w.text || '');
 
-      if (isRightOfLabel && isInYRange && isNotLabel && isNotCreditLabel && isNotSectionLabel && isNotPagination && isNotMetadata && isNotCreditCodeWord) {
+      if (isRightOfLabel && isInYRange && isNotLabel && isNotCreditLabel && isNotSectionLabel && isNotPagination && isNotDateFragment && isNotFullDate && isNotMetadata && isNotCreditCodeWord && isNotCcSingleChar && isNotWhitespace) {
         var blockedByCredit = false;
         for (var ci = 0; ci < creditLabels.length; ci++) {
           var cl = creditLabels[ci];
@@ -1410,13 +1408,67 @@ function _extractNamesByCoords(words, result) {
     if (regionWords.length === 0) continue;
 
     var nameText = _joinWordsByLine(regionWords);
-    var cleaned = _cleanName(nameText);
-    if (cleaned) {
-      foundNames.push({ label: label, name: cleaned, ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
+    // 拼接错误检测: 如果 region 文本包含多个公司后缀(如"无锡天鹏...有限公司京山诺安...有限公司"),
+    // 说明两个公司名被错误地收集到同一个 region。按公司后缀拆分,记录所有部分。
+    // 字符类包含空格,因为 _joinWordsByLine 可能在行内保留空格(如"共1页 第1页无锡天鹏...")
+    // 注意: "集团"不作为拆分后缀,因为"XX集团有限公司"是合法公司名,"集团"是名称的一部分
+    var _multiSuffixRe = new RegExp('([\\u4e00-\\u9fff][\\u4e00-\\u9fff\\w（）()·\\-\\.\\s]*?(?:公司|商行|商店|厂|部|院|所|中心|店|馆|站|社|行|会|处|室|局|办|坊|铺|有限合伙|合伙企业|个体工商户|个体户|工作室|经营部|门市部|分公司|事业部|事务所|医院|学校|幼儿园|合作社|企业|商社|贸易行|服务部))', 'g');
+    var _multiParts = nameText.match(_multiSuffixRe);
+    // 仅当拆分出2个以上部分,且每个部分都以"公司"/"厂"/"院"等完整后缀结尾时才认为是拼接错误
+    // 避免把"江苏新时代工程科技集团有限公司无锡分公司"错误拆分为3部分
+    if (_multiParts && _multiParts.length >= 2) {
+      // 验证: 拆分部分之间的衔接是否合理。如果前一部分的末尾是"集团"而后一部分以"有限公司"开头,
+      // 说明是同一个公司名被错误拆分,不触发拼接检测
+      var _isValidSplit = true;
+      for (var _pi = 0; _pi < _multiParts.length - 1; _pi++) {
+        var _cur = _multiParts[_pi];
+        var _next = _multiParts[_pi + 1];
+        // "集团"+"有限公司"是同一公司名的组成部分,不拆分
+        if (/集团$/.test(_cur) && /^有限公司/.test(_next)) {
+          _isValidSplit = false;
+          break;
+        }
+        // "公司"+"XX分公司"是同一公司名的组成部分,不拆分
+        // (如"江苏新时代工程科技集团有限公司"+"无锡分公司")
+        if (/公司$/.test(_cur) && /^.{1,6}分公司$/.test(_next)) {
+          _isValidSplit = false;
+          break;
+        }
+        // "公司"+"XX事业部"是同一公司名的组成部分,不拆分
+        if (/公司$/.test(_cur) && /^.{1,6}事业部$/.test(_next)) {
+          _isValidSplit = false;
+          break;
+        }
+      }
+      if (_isValidSplit) {
+        foundNames.push({ label: label, name: _cleanName(_multiParts[0]), allParts: _multiParts.map(_cleanName).filter(Boolean), ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
+      } else {
+        // 同一公司名被错误拆分,合并为一个完整名称
+        var _mergedName = _cleanName(_multiParts.join(''));
+        if (_mergedName) {
+          foundNames.push({ label: label, name: _mergedName, ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
+        }
+      }
+    } else {
+      var cleaned = _cleanName(nameText);
+      if (cleaned) {
+        foundNames.push({ label: label, name: cleaned, ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
+      }
     }
   }
 
   if (foundNames.length === 0) return;
+
+  // 收集所有 foundNames 的 allParts(拼接拆分场景),用于去重分配
+  var _allPartsCollected = [];
+  for (var _apc = 0; _apc < foundNames.length; _apc++) {
+    if (foundNames[_apc].allParts) {
+      for (var _appi = 0; _appi < foundNames[_apc].allParts.length; _appi++) {
+        var _appv = foundNames[_apc].allParts[_appi];
+        if (_allPartsCollected.indexOf(_appv) < 0) _allPartsCollected.push(_appv);
+      }
+    }
+  }
 
   // Assign names based on spatial position (not word order which is unreliable for PDF text)
   var leftNames = foundNames.filter(function(n) { return n.isLeftSide; });
@@ -1428,6 +1480,17 @@ function _extractNamesByCoords(words, result) {
   }
   if (!result.sellerName && rightNames.length > 0) {
     result.sellerName = rightNames[0].name;
+  }
+
+  // 拼接拆分场景: 如果 buyerName 和 sellerName 相同(都取了 allParts[0]),
+  // 从 _allPartsCollected 中找第二个不同的公司名作为 sellerName
+  if (result.buyerName && !result.sellerName && _allPartsCollected.length >= 2) {
+    for (var _apb = 0; _apb < _allPartsCollected.length; _apb++) {
+      if (_allPartsCollected[_apb] !== result.buyerName) {
+        result.sellerName = _allPartsCollected[_apb];
+        break;
+      }
+    }
   }
 
   // Fallback: if we found names but couldn't assign by side, use word order
@@ -1616,6 +1679,12 @@ function _extractByText(fullText, words) {
   if (words && words.length > 0) {
     var ccWordRe = /^[0-9][A-Z0-9]{17}$/i;  // 18-char unified social credit code
     var coordCodes = { buyer: '', seller: '' };
+    // 预先收集所有"统一社会信用代码"标签词,用于信用代码的侧别判定
+    // 信用代码词本身的nx可能跨越边界(如购方代码nx=0.12 > boundaryNx=0.10),
+    // 应该用其上方最近的"统一社会信用代码"标签的nx来判定侧别
+    var _ccLabels = words.filter(function(w) {
+      return /统一社会(?:信用代码)?/.test(w.text) || /统一社会(?:信用代码)?/.test(w.normText);
+    });
     words.forEach(function(w) {
       var cleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
       // 18-char code: allow pure digits (统一社会信用代码 can be all digits per GB 32100-2015)
@@ -1623,8 +1692,25 @@ function _extractByText(fullText, words) {
       var _ccPureDigit = /^\d+$/.test(cleaned);
       if (cleaned.length >= 15 && cleaned.length <= 20 && /^[0-9]/.test(cleaned) &&
           (!_ccPureDigit || cleaned.length === 18)) {
-        // Use the same header-anchor-based side determination as name extraction
-        var _ccIsLeft = _determineLabelSide(w, words);
+        // 找到信用代码词最近的"统一社会信用代码"标签
+        // 购方标签和销方标签可能水平左右排列(ny相同),也可能上下排列
+        // 用综合距离(y距离 + x距离)找到最近的标签
+        // 如果找不到标签(如银行账号误判),用代码词本身的nx判定
+        var _ccLabelNearest = null;
+        var _minDist = Infinity;
+        for (var _cli = 0; _cli < _ccLabels.length; _cli++) {
+          var _cl = _ccLabels[_cli];
+          var _yDist = Math.abs(_cl.cy - w.cy);
+          var _xDist = Math.abs(_cl.cx - w.cx);
+          // 综合距离: y距离 + x距离(y距离权重更高,因为标签通常在代码词上方)
+          var _dist = _yDist * 2 + _xDist;
+          if (_dist < _minDist) {
+            _minDist = _dist;
+            _ccLabelNearest = _cl;
+          }
+        }
+        var _sideWord = _ccLabelNearest || w;
+        var _ccIsLeft = _determineLabelSide(_sideWord, words);
         if (_ccIsLeft) {
           if (!coordCodes.buyer) coordCodes.buyer = cleaned;
         } else {
@@ -1911,7 +1997,6 @@ function _extractByText(fullText, words) {
     }
     if (_fbMatches.length >= 1) {
       result.sellerName = _fbMatches[_fbMatches.length - 1];
-      console.log('[交叉验证后fallback] 重新提取 sellerName:', result.sellerName);
     }
   }
 
@@ -1937,13 +2022,11 @@ function _crossValidateBuyerSeller(result, words) {
   // (e.g., both "名称：" labels matched the same company name).
   // Real invoices where buyer === seller are extremely rare; treat as extraction error.
   if (result.buyerName && result.sellerName && result.buyerName === result.sellerName) {
-    console.log('[交叉验证] buyerName === sellerName, 清空 sellerName 触发重试:', result.sellerName);
     result.sellerName = '';
   }
 
   if (result.buyerCreditCode && result.sellerCreditCode &&
       result.buyerCreditCode === result.sellerCreditCode) {
-    console.log('[交叉验证] buyerCreditCode === sellerCreditCode, 清空 sellerCreditCode:', result.sellerCreditCode);
     result.sellerCreditCode = '';
   }
 
@@ -1989,7 +2072,6 @@ function _crossValidateBuyerSeller(result, words) {
     var bNx = _findWordNx(result.buyerName);
     var sNx = _findWordNx(result.sellerName);
     if (bNx !== null && sNx !== null && (sNx + MARGIN) < bNx) {
-      console.log('[交叉验证] 名称位置反了, 交换 buyer/seller. buyer.nx=' + bNx + ' seller.nx=' + sNx);
       var _tmpName = result.buyerName;
       result.buyerName = result.sellerName;
       result.sellerName = _tmpName;
@@ -2001,7 +2083,6 @@ function _crossValidateBuyerSeller(result, words) {
     var bCcNx = _findWordNx(result.buyerCreditCode);
     var sCcNx = _findWordNx(result.sellerCreditCode);
     if (bCcNx !== null && sCcNx !== null && (sCcNx + MARGIN) < bCcNx) {
-      console.log('[交叉验证] 信用代码位置反了, 交换. buyerCc.nx=' + bCcNx + ' sellerCc.nx=' + sCcNx);
       var _tmpCc = result.buyerCreditCode;
       result.buyerCreditCode = result.sellerCreditCode;
       result.sellerCreditCode = _tmpCc;
@@ -2021,7 +2102,6 @@ function _crossValidateBuyerSeller(result, words) {
     var _rule4Bound = _getSideBoundary(words);
     if (sCcNx2 !== null && bNx2 !== null && Math.abs(sCcNx2 - bNx2) < MARGIN * 2 && sCcNx2 >= _rule4Bound) {
       // buyerName sits at the same x as sellerCreditCode (seller side) → buyerName is actually seller
-      console.log('[交叉验证] buyerName 实为销售方（与 sellerCreditCode 同侧），迁移');
       result.sellerName = result.buyerName;
       result.buyerName = '';
     }
@@ -3500,9 +3580,6 @@ function extractByCoordinates(ocrResult) {
       if (tracedCodes.length === 1 && !sellerCreditCode && !buyerCreditCode) {
         // Single code → likely seller
         sellerCreditCode = tracedCodes[0].code;
-      }
-      if (tracedCodes.length > 0) {
-        console.log('[信用代码追踪] 从标签追踪拼接:', tracedCodes.map(function(c) { return c.code + (c.isLeft ? '(买)' : '(售)'); }));
       }
     }
     // Then try text regex
