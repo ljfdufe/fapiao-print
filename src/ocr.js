@@ -1882,6 +1882,27 @@ function _extractByText(fullText, words) {
   // or swap them when both values are clearly present but on wrong sides.
   _crossValidateBuyerSeller(result, words);
 
+  // Fallback: if cross-validation cleared sellerName (e.g., Rule 1 detected duplicate),
+  // Priority 2-6 already ran and won't retry. Re-extract from company-name suffix matches,
+  // excluding the buyerName to avoid re-duplicating.
+  if (!result.sellerName && result.buyerName) {
+    var _csSuffixFb = '(?:公司|集团|商行|商店|厂|部|院|所|中心|店|馆|站|社|行|会|处|室|局|办|坊|铺|有限合伙|合伙企业|个体工商户|个体户|工作室|经营部|门市部|分公司|事业部|事务所|医院|学校|幼儿园|合作社|企业|商社|贸易行|服务部)';
+    var _allCompReFb = new RegExp('([\\u4e00-\\u9fff][\\u4e00-\\u9fff\\w（）()·\\-\\.]' + _csSuffixFb + ')', 'g');
+    var _fbMatches = [];
+    var _fcm;
+    while ((_fcm = _allCompReFb.exec(text)) !== null) {
+      var _fcn = _fcm[1].trim();
+      if (_fcn.length > 3 && _fcn !== result.buyerName &&
+          !/^(?:购买方|销售方|信息|名称|地址)/.test(_fcn)) {
+        _fbMatches.push(_fcn);
+      }
+    }
+    if (_fbMatches.length >= 1) {
+      result.sellerName = _fbMatches[_fbMatches.length - 1];
+      console.log('[交叉验证后fallback] 重新提取 sellerName:', result.sellerName);
+    }
+  }
+
   return result;
 }
 
