@@ -1,5 +1,27 @@
 # 📋 更新日志
 
+## v2.1.1 — 修复购销方识别错位
+
+### 🐛 修复
+
+- **表头锚点法**：用「购买方」/「销售方」表头词的 x 坐标作为区域锚点，替代固定 0.5 边界判定，解决扫描偏移/发票宽度差异导致的左右半误判
+- **CJK 拆字兜底**：dzcp/iloveofd 格式下「购+买+方」/「销+售+方」单字序列合成虚拟表头
+- **动态边界**：词收集过滤器和信用代码分类使用表头中点作为边界（无表头时 fallback 到 0.5），保持 label 分类与 word 过滤一致
+- **交叉验证纠错**：
+  - 同名检测（buyerName === sellerName → 清空 sellerName 触发重试）
+  - 位置反推（sellerName 的 x < buyerName 的 x 且差距 > 15% → 交换）
+  - 信用代码位置反推（同理）
+  - 信用代码锚点纠错（sellerCreditCode 同侧的 buyerName 实为销售方）
+- **性能优化**：表头检测按 words 数组引用缓存，避免紧密循环中重复扫描
+
+### 📊 影响范围
+
+- `src/ocr.js`：新增 `_determineLabelSide` / `_getSideBoundary` / `_crossValidateBuyerSeller` 三个函数
+- 所有固定 0.5 边界判定（label 分类、词收集、信用代码分类）统一改为动态边界
+- `_extractSeller` 兜底函数的 0.45 宽松阈值保持不变（兜底场景需要更宽容）
+
+---
+
 ## v2.1.0 — 版本号显示 + 检查更新功能
 
 ### 🔄 检查更新（GitHub Release）

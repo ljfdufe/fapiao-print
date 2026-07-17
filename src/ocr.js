@@ -1017,6 +1017,150 @@ function _joinWordsByLine(words) {
 }
 
 /**
+ * Determine which side (buyer=left / seller=right) a "名称" label belongs to.
+ *
+ * Strategy (v2.1.1) — prefers header anchors over the fixed 0.5 split:
+ *   1. Find "购买方" / "销售方" header words at the top of the buyer/seller info block.
+ *      These headers have stable x-coordinates that don't shift with scan offset.
+ *   2. If both headers found, assign label to whichever header is closer in x.
+ *   3. If only one header found, use it as the boundary reference.
+ *   4. Fallback: legacy fixed 0.5 split (covers non-VAT invoices, ride invoices, etc.)
+ *
+ * Performance: header detection is cached per words-array reference to avoid
+ * re-scanning on every call (this function is called in tight loops).
+ *
+ * @param {Object} label - the "名称" label word
+ * @param {Array} words - all words in the document
+ * @returns {boolean} true if label is on the buyer (left) side
+ */
+var _headerCache = { wordsRef: null, buyerNx: null, sellerNx: null, boundaryNx: 0.5 };
+function _determineLabelSide(label, words) {
+  if (!words || words.length === 0 || !label) return label.nx < 0.5;
+
+  // Cache header positions per words array (avoids O(n) rescan on every call)
+  if (_headerCache.wordsRef !== words) {
+    var buyerHeaders = [];
+    var sellerHeaders = [];
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      var t = w.text || '';
+      var nt = w.normText || '';
+      if (/^购\s*买\s*方/.test(t) || /^购\s*买\s*方/.test(nt)) {
+        buyerHeaders.push(w);
+        continue;
+      }
+      if (/^销\s*售\s*方/.test(t) || /^销\s*售\s*方/.test(nt)) {
+        sellerHeaders.push(w);
+        continue;
+      }
+    }
+
+    // CJK split-char fallback: synthesize "购买方" / "销售方" from 购+买+方 / 销+售+方
+    // Only run when no fused headers were found (dzcp / iloveofd format)
+    if (buyerHeaders.length === 0 && sellerHeaders.length === 0) {
+      var gouWords = words.filter(function(w) {
+        return (w.text === '购' || w.normText === '购') && w.w < w.h * 3;
+      });
+      var xiaoWords = words.filter(function(w) {
+        return (w.text === '销' || w.normText === '销') && w.w < w.h * 3;
+      });
+      for (var gi = 0; gi < gouWords.length; gi++) {
+        var gw = gouWords[gi];
+        var maiWords = words.filter(function(w) {
+          return (w.text === '买' || w.normText === '买') && w.w < w.h * 3 &&
+                 Math.abs(w.y - gw.y) <= gw.h * 0.5 && w.x >= gw.x - gw.h * 0.5 && w.x <= gw.x + gw.w * 3;
+        });
+        if (maiWords.length === 0) continue;
+        var mw = maiWords[0];
+        var fangWords = words.filter(function(w) {
+          return (w.text === '方' || w.normText === '方') && w.w < w.h * 3 &&
+                 Math.abs(w.y - mw.y) <= mw.h * 0.5 && w.x >= mw.x - mw.h * 0.5 && w.x <= mw.x + mw.w * 3;
+        });
+        if (fangWords.length > 0) {
+          buyerHeaders.push(gw);
+          break;
+        }
+      }
+      for (var xi = 0; xi < xiaoWords.length; xi++) {
+        var xw = xiaoWords[xi];
+        var shouWords = words.filter(function(w) {
+          return (w.text === '售' || w.normText === '售') && w.w < w.h * 3 &&
+                 Math.abs(w.y - xw.y) <= xw.h * 0.5 && w.x >= xw.x - xw.h * 0.5 && w.x <= xw.x + xw.w * 3;
+        });
+        if (shouWords.length === 0) continue;
+        var sw = shouWords[0];
+        var fangWords2 = words.filter(function(w) {
+          return (w.text === '方' || w.normText === '方') && w.w < w.h * 3 &&
+                 Math.abs(w.y - sw.y) <= sw.h * 0.5 && w.x >= sw.x - sw.h * 0.5 && w.x <= sw.x + sw.w * 3;
+        });
+        if (fangWords2.length > 0) {
+          sellerHeaders.push(xw);
+          break;
+        }
+      }
+    }
+
+    var _bNx = buyerHeaders.length > 0 ? buyerHeaders[0].nx : null;
+    var _sNx = sellerHeaders.length > 0 ? sellerHeaders[0].nx : null;
+    // Compute boundary between buyer and seller sides (used for word filtering)
+    // - Both headers: midpoint between them
+    // - Only buyer header: buyerNx + 0.25 (assume seller is to the right)
+    // - Only seller header: sellerNx - 0.25 (assume buyer is to the left)
+    // - No headers: 0.5 (legacy fallback)
+    var _boundNx = 0.5;
+    if (_bNx !== null && _sNx !== null) {
+      _boundNx = (_bNx + _sNx) / 2;
+    } else if (_bNx !== null) {
+      _boundNx = _bNx + 0.25;
+    } else if (_sNx !== null) {
+      _boundNx = _sNx - 0.25;
+    }
+    _headerCache.wordsRef = words;
+    _headerCache.buyerNx = _bNx;
+    _headerCache.sellerNx = _sNx;
+    _headerCache.boundaryNx = _boundNx;
+  }
+
+  var buyerHeaderNx = _headerCache.buyerNx;
+  var sellerHeaderNx = _headerCache.sellerNx;
+
+  // No headers found — fall back to legacy fixed 0.5 split
+  if (buyerHeaderNx === null && sellerHeaderNx === null) {
+    return label.nx < 0.5;
+  }
+
+  // Both headers present — pick whichever side the label is closer to
+  if (buyerHeaderNx !== null && sellerHeaderNx !== null) {
+    var distToBuyer = Math.abs(label.nx - buyerHeaderNx);
+    var distToSeller = Math.abs(label.nx - sellerHeaderNx);
+    return distToBuyer < distToSeller;
+  }
+
+  // Only buyer header present — labels close to it = buyer, far from it = seller
+  if (buyerHeaderNx !== null) {
+    return label.nx <= buyerHeaderNx + 0.15;
+  }
+
+  // Only seller header present — labels close to it = seller, far from it = buyer
+  return label.nx >= sellerHeaderNx - 0.15 ? false : true;
+}
+
+/**
+ * Get the boundary nx (normalized x) between buyer and seller sides.
+ * Words with nx < boundary are on the buyer side; nx >= boundary are seller side.
+ * Uses the same header-anchor cache as _determineLabelSide.
+ * Falls back to 0.5 when no headers are found.
+ */
+function _getSideBoundary(words) {
+  if (!words || words.length === 0) return 0.5;
+  // Ensure cache is populated
+  if (_headerCache.wordsRef !== words) {
+    _determineLabelSide({ nx: 0 }, words);
+  }
+  return _headerCache.boundaryNx;
+}
+
+/**
  * Extract buyer/seller names using coordinate-based region matching.
  * Strategy: Find "名称" label positions, then collect all words in the
  * region to the right of each label (and slightly below for multi-line names).
@@ -1078,7 +1222,7 @@ function _extractNamesByCoords(words, result) {
     if (_ilnMatch && _ilnMatch[1].trim()) {
       var _ilnName = _cleanName(_ilnMatch[1]);
       if (_ilnName) {
-        var _ilnIsLeft = _ilnWord.nx < 0.5;
+        var _ilnIsLeft = _determineLabelSide(_ilnWord, words);
         inlineNameResults.push({ label: _ilnWord, name: _ilnName, ny: _ilnWord.ny, nx: _ilnWord.nx, wordIndex: words.indexOf(_ilnWord), isLeftSide: _ilnIsLeft });
       }
     }
@@ -1154,9 +1298,14 @@ function _extractNamesByCoords(words, result) {
     var lineH = label.h;
 
     // Determine which side of the invoice this label belongs to.
-    // Standard VAT layout: buyer info is left half (nx < 0.5), seller info is right half (nx >= 0.5).
-    // This prevents words from the other side being included (the #1 cause of name concatenation).
-    var isLeftSide = label.nx < 0.5;
+    // Strategy (v2.1.1): Use "购买方" / "销售方" header words as anchors when available.
+    // These header words sit at the top of the buyer/seller info block and provide a
+    // more reliable x-coordinate reference than the fixed 0.5 boundary.
+    // Fallback to the legacy 0.5 split when no headers are found.
+    var isLeftSide = _determineLabelSide(label, words);
+    // Boundary is document-level (same for all labels) — compute once per label iteration
+    // (cheap due to caching, but avoids per-word function call overhead)
+    var _sideBoundNx = _getSideBoundary(words);
 
     var regionWords = [];
     // Build set of credit label source words to exclude (CJK split-char scenario)
@@ -1176,8 +1325,9 @@ function _extractNamesByCoords(words, result) {
         var _cw = words[_cwi];
         if (_cw.text.length === 1 && /[\u4e00-\u9fff]/.test(_cw.text)) {
           // Same side and same vertical band as credit label
-          var _clIsLeft = _cl.nx < 0.5;
-          var _cwIsLeft = _cw.nx < 0.5;
+          // Use header-anchor side determination for consistency (v2.1.1)
+          var _clIsLeft = _determineLabelSide(_cl, words);
+          var _cwIsLeft = _determineLabelSide(_cw, words);
           if (_clIsLeft === _cwIsLeft && Math.abs(_cw.cy - _cl.cy) <= _cl.h * 1.5) {
             if (_creditSrcWordSet.indexOf(_cw) < 0) {
               _creditSrcWordSet.push(_cw);
@@ -1197,8 +1347,10 @@ function _extractNamesByCoords(words, result) {
       // ENFORCE REGION BOUNDARY: only collect words on the SAME SIDE as the label.
       // This is the critical fix — without it, "名称：" on the left half would also
       // collect the seller's company name from the right half, producing concatenated names.
-      if (isLeftSide && w.nx >= 0.5) continue;  // left-side label → skip right-half words
-      if (!isLeftSide && w.nx < 0.5) continue;   // right-side label → skip left-half words
+      // Boundary is dynamic (v2.1.1): midpoint of buyer/seller headers when available,
+      // falling back to 0.5. This keeps label classification and word filtering consistent.
+      if (isLeftSide && w.nx >= _sideBoundNx) continue;  // left-side label → skip right-half words
+      if (!isLeftSide && w.nx < _sideBoundNx) continue;   // right-side label → skip left-half words
 
       var isRightOfLabel = w.x >= label.x - lineH * 0.3;
       // For seller-side labels, also look slightly ABOVE (some ride invoices have
@@ -1223,7 +1375,8 @@ function _extractNamesByCoords(words, result) {
         for (var ci = 0; ci < creditLabels.length; ci++) {
           var cl = creditLabels[ci];
           // Only consider credit labels on the SAME SIDE as the name label
-          var clIsLeft = cl.nx < 0.5;
+          // Use the same header-anchor-based side determination (v2.1.1)
+          var clIsLeft = _determineLabelSide(cl, words);
           if (clIsLeft !== isLeftSide) continue;
           // Block words at or below the credit label's y position
           // Relaxed ny threshold (0.3) to handle ride invoices with compact layouts
@@ -1439,7 +1592,8 @@ function _extractByText(fullText, words) {
 
   // --- Buyer/Seller credit codes ---
   // STRATEGY: Coordinate-based assignment is primary (more reliable than text order).
-  // Credit code words in the left half (nx < 0.5) → buyer, right half (nx >= 0.5) → seller.
+  // Credit code words in the buyer half → buyer, seller half → seller.
+  // Side determination uses header anchors (v2.1.1) with legacy 0.5 fallback.
   // Text-order fallback only when coordinates are unavailable.
 
   // Method 1: Coordinate-based — find credit code words and assign by position
@@ -1453,7 +1607,9 @@ function _extractByText(fullText, words) {
       var _ccPureDigit = /^\d+$/.test(cleaned);
       if (cleaned.length >= 15 && cleaned.length <= 20 && /^[0-9]/.test(cleaned) &&
           (!_ccPureDigit || cleaned.length === 18)) {
-        if (w.nx < 0.5) {
+        // Use the same header-anchor-based side determination as name extraction
+        var _ccIsLeft = _determineLabelSide(w, words);
+        if (_ccIsLeft) {
           if (!coordCodes.buyer) coordCodes.buyer = cleaned;
         } else {
           if (!coordCodes.seller) coordCodes.seller = cleaned;
@@ -1541,7 +1697,7 @@ function _extractByText(fullText, words) {
       }
       _tcCode = _tcCode.toUpperCase();
       if (_tcCode.length === 18 && /^[0-9]/.test(_tcCode)) {
-        _tracedCodes.push({ code: _tcCode, isLeft: _tcLabel.nx < 0.5 });
+        _tracedCodes.push({ code: _tcCode, isLeft: _determineLabelSide(_tcLabel, words) });
       }
     }
     for (var _tai = 0; _tai < _tracedCodes.length; _tai++) {
@@ -1709,7 +1865,111 @@ function _extractByText(fullText, words) {
     }
   }
 
+  // ========== Cross-validation: detect & fix buyer/seller name swap ==========
+  // 3 signals that indicate the names are swapped:
+  //   1. buyerName === sellerName (same value → one side lost, the other duplicated)
+  //   2. sellerName's x coord < buyerName's x coord (seller should be on the right)
+  //   3. sellerCreditCode's x coord < buyerCreditCode's x coord (same check for codes)
+  // When detected, clear the weaker value to let downstream extraction retry,
+  // or swap them when both values are clearly present but on wrong sides.
+  _crossValidateBuyerSeller(result, words);
+
   return result;
+}
+
+/**
+ * Cross-validate buyer/seller fields and fix common swap errors.
+ * Strategy (conservative — only fix when evidence is strong):
+ *   1. If buyerName === sellerName → clear sellerName (one side was duplicated)
+ *   2. If both names found but seller's x < buyer's x by a clear margin → swap
+ *   3. If both credit codes found but seller's x < buyer's x by a clear margin → swap
+ *   4. Use credit code x position to disambiguate when only one name has a clear side
+ *
+ * @param {Object} result - extraction result (mutated)
+ * @param {Array} [words] - word objects with nx coordinates
+ */
+function _crossValidateBuyerSeller(result, words) {
+  if (!result) return;
+
+  // --- Rule 1: identical buyer/seller names → clear sellerName (keep buyerName) ---
+  // This happens when the OCR/text extraction mistakenly reads the same name twice
+  // (e.g., both "名称：" labels matched the same company name).
+  // Real invoices where buyer === seller are extremely rare; treat as extraction error.
+  if (result.buyerName && result.sellerName && result.buyerName === result.sellerName) {
+    console.log('[交叉验证] buyerName === sellerName, 清空 sellerName 触发重试:', result.sellerName);
+    result.sellerName = '';
+  }
+
+  if (result.buyerCreditCode && result.sellerCreditCode &&
+      result.buyerCreditCode === result.sellerCreditCode) {
+    console.log('[交叉验证] buyerCreditCode === sellerCreditCode, 清空 sellerCreditCode:', result.sellerCreditCode);
+    result.sellerCreditCode = '';
+  }
+
+  if (!words || words.length === 0) return;
+
+  // Helper: find the word matching a given text, returns its nx (normalized x)
+  function _findWordNx(text) {
+    if (!text) return null;
+    var _clean = String(text).trim();
+    if (!_clean) return null;
+    // Try exact match first, then "contains" match (handles prefix/suffix noise)
+    var exact = null, contains = null;
+    for (var i = 0; i < words.length; i++) {
+      var wt = (words[i].text || '').trim();
+      var wn = (words[i].normText || '').trim();
+      if (wt === _clean || wn === _clean) { exact = words[i].nx; break; }
+      if (contains === null && (wt.indexOf(_clean) >= 0 || wn.indexOf(_clean) >= 0)) {
+        contains = words[i].nx;
+      }
+    }
+    return exact !== null ? exact : contains;
+  }
+
+  // --- Rule 2: position-based swap detection for names ---
+  // Standard VAT layout: buyer on LEFT (nx < 0.5), seller on RIGHT (nx >= 0.5)
+  // If seller's nx is clearly less than buyer's nx (margin > 0.15), they're swapped.
+  // Margin 0.15 ~ 15% of page width, avoids false swaps for names near the center.
+  var MARGIN = 0.15;
+  if (result.buyerName && result.sellerName) {
+    var bNx = _findWordNx(result.buyerName);
+    var sNx = _findWordNx(result.sellerName);
+    if (bNx !== null && sNx !== null && (sNx + MARGIN) < bNx) {
+      console.log('[交叉验证] 名称位置反了, 交换 buyer/seller. buyer.nx=' + bNx + ' seller.nx=' + sNx);
+      var _tmpName = result.buyerName;
+      result.buyerName = result.sellerName;
+      result.sellerName = _tmpName;
+    }
+  }
+
+  // --- Rule 3: position-based swap detection for credit codes ---
+  if (result.buyerCreditCode && result.sellerCreditCode) {
+    var bCcNx = _findWordNx(result.buyerCreditCode);
+    var sCcNx = _findWordNx(result.sellerCreditCode);
+    if (bCcNx !== null && sCcNx !== null && (sCcNx + MARGIN) < bCcNx) {
+      console.log('[交叉验证] 信用代码位置反了, 交换. buyerCc.nx=' + bCcNx + ' sellerCc.nx=' + sCcNx);
+      var _tmpCc = result.buyerCreditCode;
+      result.buyerCreditCode = result.sellerCreditCode;
+      result.sellerCreditCode = _tmpCc;
+    }
+  }
+
+  // --- Rule 4: anchor credit code position → fix name side when only one is wrong ---
+  // If sellerCreditCode is on the RIGHT (correct side) but sellerName is missing,
+  // and buyerName is on the RIGHT side (wrong), buyerName is likely the real seller.
+  // This catches the case where buyer was mis-extracted but seller code provides truth.
+  if (result.sellerCreditCode && !result.sellerName && result.buyerName) {
+    var sCcNx2 = _findWordNx(result.sellerCreditCode);
+    var bNx2 = _findWordNx(result.buyerName);
+    // Use dynamic boundary (v2.1.1) instead of fixed 0.5 for side determination
+    var _rule4Bound = _getSideBoundary(words);
+    if (sCcNx2 !== null && bNx2 !== null && Math.abs(sCcNx2 - bNx2) < MARGIN && sCcNx2 >= _rule4Bound) {
+      // buyerName sits at the same x as sellerCreditCode (seller side) → buyerName is actually seller
+      console.log('[交叉验证] buyerName 实为销售方（与 sellerCreditCode 同侧），迁移');
+      result.sellerName = result.buyerName;
+      result.buyerName = '';
+    }
+  }
 }
 
 /**
@@ -3107,14 +3367,15 @@ function extractByCoordinates(ocrResult) {
     if (words && words.length > 0) {
       var ccWordRe2 = /^[0-9][A-Z0-9]{14,19}$/i;
       var coordFallback = { buyer: '', seller: '' };
+      var _coordBound = _getSideBoundary(words);
       words.forEach(function(w) {
         var cleaned = w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
         // 18位纯数字也可能是统一社会信用代码(GB 32100-2015)，不再强制要求含字母
         // 但排除15-17位和19-20位纯数字(更可能是发票号码)
         var _isPureDigit = /^\d+$/.test(cleaned);
         if (ccWordRe2.test(cleaned) && (!_isPureDigit || cleaned.length === 18)) {
-          if (w.nx < 0.5 && !coordFallback.buyer) coordFallback.buyer = cleaned;
-          else if (w.nx >= 0.5 && !coordFallback.seller) coordFallback.seller = cleaned;
+          if (w.nx < _coordBound && !coordFallback.buyer) coordFallback.buyer = cleaned;
+          else if (w.nx >= _coordBound && !coordFallback.seller) coordFallback.seller = cleaned;
         }
       });
       if (!buyerCreditCode && coordFallback.buyer) buyerCreditCode = coordFallback.buyer;
@@ -3163,7 +3424,7 @@ function extractByCoordinates(ocrResult) {
         // Validate: must be exactly 18 chars starting with a digit
         _tcCode = _tcCode.toUpperCase();
         if (_tcCode.length === 18 && /^[0-9]/.test(_tcCode)) {
-          var _tcIsLeft = _tcLabel.nx < 0.5;
+          var _tcIsLeft = _determineLabelSide(_tcLabel, words);
           tracedCodes.push({ code: _tcCode, isLeft: _tcIsLeft, nx: _tcLabel.nx });
         }
       }
@@ -3267,7 +3528,8 @@ function extractByCoordinates(ocrResult) {
       return w.normText.replace(/[^A-Za-z0-9]/g, '').toUpperCase() === sellerCreditCode;
     });
     if (_buyerCodeWord && _sellerCodeWord) {
-      if (_buyerCodeWord.nx >= 0.5 && _sellerCodeWord.nx < 0.5) {
+      var _swapBound = _getSideBoundary(words);
+      if (_buyerCodeWord.nx >= _swapBound && _sellerCodeWord.nx < _swapBound) {
         // Buyer code is on the RIGHT, seller code is on the LEFT → swap them
         var _tmpCode = buyerCreditCode;
         buyerCreditCode = sellerCreditCode;

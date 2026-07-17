@@ -75,6 +75,23 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **中文大写兜底**: `parseChineseNumeral()` — 阿拉伯金额因字体/编码丢失时的 fallback
 - **OCR 跳过条件**: `_pdfTextExtracted && sellerName && amountTax > 0`
 
+### 购销方识别优化 (v2.1.1)
+
+修复偶发的「购买方识别为销售方」问题，采用表头锚点 + 交叉验证双保险。
+
+- **表头锚点法** `_determineLabelSide(label, words)`：用「购买方」/「销售方」表头词的 x 坐标作为区域锚点，替代固定 0.5 边界
+  - 支持融合词（"购买方"）和 CJK 拆字序列（购+买+方）两种检测方式
+  - 双表头：label 归属距离更近的一侧；单表头：以表头 ±0.15 为判定区间；无表头：fallback 到 0.5
+- **动态边界** `_getSideBoundary(words)`：双表头中点 / 单表头 ±0.25 / 无表头 0.5
+  - 词收集过滤器和信用代码分类统一使用动态边界，保持与 label 分类一致
+- **性能缓存** `_headerCache`：按 words 数组引用缓存表头位置，避免紧密循环（信用代码排除、词收集）中重复 O(n) 扫描
+- **交叉验证** `_crossValidateBuyerSeller(result, words)`：在 `_extractByText` return 前执行
+  - Rule 1：buyerName === sellerName → 清空 sellerName（同名几乎必为识别错误）
+  - Rule 2：sellerName.nx < buyerName.nx - 0.15 → 交换（位置反了）
+  - Rule 3：sellerCreditCode.nx < buyerCreditCode.nx - 0.15 → 交换
+  - Rule 4：sellerCreditCode 同侧的 buyerName 实为销售方 → 迁移
+- **影响范围**：`_extractNamesByCoords` / `_extractByText` / `extractByCoordinates` 中所有固定 0.5 边界判定统一改为动态边界；`_extractSeller` 兜底函数的 0.45 宽松阈值保持不变
+
 ### XML 数电票解析 (v2.0.7+)
 
 `invoice-engine::parse_xml_invoice()` 解析独立 XML 数电票文件，提取结构化发票数据。
