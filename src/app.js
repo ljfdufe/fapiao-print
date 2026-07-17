@@ -2673,6 +2673,7 @@ function resetSettings() {
   try { localStorage.removeItem('ticketchan-ocr-precision'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-pdf-text-enabled'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-settings'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-print-mode'); } catch(e) {}
   _renameTemplate = ['amountTax', 'sellerName', 'invoiceNo'];
   _renameSeparator = '_';
   _summaryActiveCols = [];
