@@ -139,6 +139,7 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 利用 GitHub Release 作为更新源，启动时自动检查 + 手动触发检查双模式。
 
 - **后端命令**: `check_for_updates` — `async fn` + `reqwest` 调用 GitHub Releases API (`/repos/erma0/fapiao-print/releases/latest`)，不阻塞 IPC 线程
+- **主备双源 (v2.1.2)**：先尝试直连 `api.github.com`，失败后 fallback 到 `gh-proxy.com` 加速代理，保证大陆网络环境下更新检查可用
 - **版本比较**: `compare_versions(a, b)` 语义化版本比较函数（`-1/0/1`），`tag_name` 自动去 `v` 前缀
 - **返回结构**: `UpdateInfo { has_update, current_version, latest_version, release_notes, release_url, published_at, assets[] }`
 - **启动自动检查**: `showApp()` 中 `get_app_version` 完成后 5 秒触发 `checkForUpdates(true)` 静默检查
