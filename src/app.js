@@ -1702,6 +1702,14 @@ function syncActiveFileFromPage() {
   var perPage = S.layout.cols * S.layout.rows;
   var pageStart = S.currentPage * perPage;
   if (pageStart < activeFiles.length) {
+    // 若当前 _activeFileIdx 已在当前页范围内,保持不变(用户点击列表项时不应被覆盖)
+    if (_activeFileIdx >= 0) {
+      var curFile = S.files[_activeFileIdx];
+      var curActiveIdx = activeFiles.indexOf(curFile);
+      if (curActiveIdx >= pageStart && curActiveIdx < pageStart + perPage) {
+        return;
+      }
+    }
     var firstFileOnPage = activeFiles[pageStart];
     var newIdx = S.files.indexOf(firstFileOnPage);
     if (newIdx !== _activeFileIdx) {
