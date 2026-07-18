@@ -1471,12 +1471,15 @@ pub fn extract_pdf_texts(pdf_path: &str, page_indices: &[u32]) -> Result<std::co
         })
         .collect();
     
-    // Collect into HashMap, first error wins
+    // Collect into HashMap, skip failed pages (single page failure should not
+    // trigger full-batch fallback to slow single-page mode)
     let mut map = std::collections::HashMap::new();
     for (page_idx, result) in results {
-        map.insert(page_idx, result?);
+        if let Ok(r) = result {
+            map.insert(page_idx, r);
+        }
     }
-    
+
     Ok(map)
 }
 

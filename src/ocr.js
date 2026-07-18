@@ -495,8 +495,6 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
     // PdfTextResult lines use {words: [{text,x,y,w,h}], confidence: 1.0}
     // This is compatible with OcrLine structure expected by extractByCoordinates
 
-    // 调试：查看原始文本内容
-    console.log('[PDF文字提取] 原始文本内容:', pdfTextResult.text);
     var allWords = [];
     var amountWords = [];
     pdfTextResult.lines.forEach(function(line, lineIdx) {
@@ -509,8 +507,6 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
         });
       }
     });
-    console.log('[PDF文字提取] 词列表:', allWords);
-    console.log('[PDF文字提取] 金额词:', amountWords);
 
     var info = extractByCoordinates(pdfTextResult);
 
@@ -1284,6 +1280,34 @@ function _extractNamesByCoords(words, result) {
   for (var _ilri = 0; _ilri < inlineNameResults.length; _ilri++) {
     foundNames.push(inlineNameResults[_ilri]);
   }
+  // Build set of credit label source words to exclude (CJK split-char scenario)
+  // This prevents credit label fragments (统/一/社/会/信/用/代/码/纳/税/人/识/别/号)
+  // from being collected as name region words when CJK chars are split into single words.
+  // Performance: build once before nameLabel loop (creditLabels doesn't depend on nameLabel),
+  // use Set for O(1) membership check (was Array.indexOf O(n))
+  var _creditSrcWordSet = new Set();
+  for (var _csi = 0; _csi < creditLabels.length; _csi++) {
+    var _cl = creditLabels[_csi];
+    if (_cl._srcWords) {
+      for (var _csj = 0; _csj < _cl._srcWords.length; _csj++) {
+        _creditSrcWordSet.add(_cl._srcWords[_csj]);
+      }
+    }
+    // Also exclude all single-char words on the same line as any credit label
+    // (covers "信用代码/纳税人识别号" chars not in _srcWords)
+    for (var _cwi = 0; _cwi < words.length; _cwi++) {
+      var _cw = words[_cwi];
+      if (_cw.text.length === 1 && /[\u4e00-\u9fff]/.test(_cw.text)) {
+        // Same side and same vertical band as credit label
+        // Use header-anchor side determination for consistency (v2.1.1)
+        var _clIsLeft = _determineLabelSide(_cl, words);
+        var _cwIsLeft = _determineLabelSide(_cw, words);
+        if (_clIsLeft === _cwIsLeft && Math.abs(_cw.cy - _cl.cy) <= _cl.h * 1.5) {
+          _creditSrcWordSet.add(_cw);
+        }
+      }
+    }
+  }
   for (var li = 0; li < nameLabels.length; li++) {
     var label = nameLabels[li];
     // Skip if this label already produced an inline name result
@@ -1304,41 +1328,13 @@ function _extractNamesByCoords(words, result) {
     var _sideBoundNx = _getSideBoundary(words);
 
     var regionWords = [];
-    // Build set of credit label source words to exclude (CJK split-char scenario)
-    // This prevents credit label fragments (统/一/社/会/信/用/代/码/纳/税/人/识/别/号)
-    // from being collected as name region words when CJK chars are split into single words.
-    var _creditSrcWordSet = [];
-    for (var _csi = 0; _csi < creditLabels.length; _csi++) {
-      var _cl = creditLabels[_csi];
-      if (_cl._srcWords) {
-        for (var _csj = 0; _csj < _cl._srcWords.length; _csj++) {
-          _creditSrcWordSet.push(_cl._srcWords[_csj]);
-        }
-      }
-      // Also exclude all single-char words on the same line as any credit label
-      // (covers "信用代码/纳税人识别号" chars not in _srcWords)
-      for (var _cwi = 0; _cwi < words.length; _cwi++) {
-        var _cw = words[_cwi];
-        if (_cw.text.length === 1 && /[\u4e00-\u9fff]/.test(_cw.text)) {
-          // Same side and same vertical band as credit label
-          // Use header-anchor side determination for consistency (v2.1.1)
-          var _clIsLeft = _determineLabelSide(_cl, words);
-          var _cwIsLeft = _determineLabelSide(_cw, words);
-          if (_clIsLeft === _cwIsLeft && Math.abs(_cw.cy - _cl.cy) <= _cl.h * 1.5) {
-            if (_creditSrcWordSet.indexOf(_cw) < 0) {
-              _creditSrcWordSet.push(_cw);
-            }
-          }
-        }
-      }
-    }
     for (var wi = 0; wi < words.length; wi++) {
       var w = words[wi];
       if (w === label) continue;
       // For virtual (synthesized) labels from CJK split chars, also skip the source words
       if (label._srcWords && label._srcWords.indexOf(w) >= 0) continue;
       // Skip source words of virtual credit labels (统/一/社/会 etc.)
-      if (_creditSrcWordSet.indexOf(w) >= 0) continue;
+      if (_creditSrcWordSet.has(w)) continue;
 
       // ENFORCE REGION BOUNDARY: only collect words on the SAME SIDE as the label.
       // This is the critical fix — without it, "名称：" on the left half would also
@@ -1420,6 +1416,20 @@ function _extractNamesByCoords(words, result) {
       // 验证: 拆分部分之间的衔接是否合理。如果前一部分的末尾是"集团"而后一部分以"有限公司"开头,
       // 说明是同一个公司名被错误拆分,不触发拼接检测
       var _isValidSplit = true;
+      // 检查 nameText 中括号位置: 如果括号出现在第一个匹配之后,
+      // 说明是括号内的补充信息(如"无锡市防雷中心(某某分中心)"),不拆分
+      var _firstMatchEnd = -1;
+      if (_multiParts.length > 0) {
+        var _firstMatch = _multiParts[0];
+        _firstMatchEnd = nameText.indexOf(_firstMatch);
+        if (_firstMatchEnd >= 0) _firstMatchEnd += _firstMatch.length;
+      }
+      if (_firstMatchEnd > 0 && _firstMatchEnd < nameText.length) {
+        var _afterFirst = nameText.substring(_firstMatchEnd);
+        if (/^[（(]/.test(_afterFirst)) {
+          _isValidSplit = false;
+        }
+      }
       for (var _pi = 0; _pi < _multiParts.length - 1; _pi++) {
         var _cur = _multiParts[_pi];
         var _next = _multiParts[_pi + 1];
@@ -1444,7 +1454,8 @@ function _extractNamesByCoords(words, result) {
         foundNames.push({ label: label, name: _cleanName(_multiParts[0]), allParts: _multiParts.map(_cleanName).filter(Boolean), ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
       } else {
         // 同一公司名被错误拆分,合并为一个完整名称
-        var _mergedName = _cleanName(_multiParts.join(''));
+        // 优先用 nameText(保留括号等正则未匹配的字符),回退到 join
+        var _mergedName = _cleanName(nameText) || _cleanName(_multiParts.join(''));
         if (_mergedName) {
           foundNames.push({ label: label, name: _mergedName, ny: label.ny, nx: label.nx, wordIndex: words.indexOf(label), isLeftSide: isLeftSide });
         }
@@ -1644,6 +1655,32 @@ function _extractByText(fullText, words) {
       }
     }
   }
+  // Pattern 5: CJK split-char date merge (each fragment is a separate word)
+  // e.g., words: ['2025', '年', '02', '月', '24', '日']
+  // Merge adjacent words matching the sequence and reconstruct the date
+  if (!result.invoiceDate && words && words.length >= 6) {
+    for (var _di5 = 0; _di5 + 5 < words.length; _di5++) {
+      var _y5 = (words[_di5].text || '').trim();
+      var _y5n = (words[_di5].normText || '').trim();
+      if (!/^\d{4}$/.test(_y5) && !/^\d{4}$/.test(_y5n)) continue;
+      var _yr5 = /^\d{4}$/.test(_y5) ? _y5 : _y5n;
+      // Check year range
+      var _yr5Num = parseInt(_yr5, 10);
+      if (_yr5Num < 2020 || _yr5Num > 2035) continue;
+      // Next 5 words must be: 年, MM, 月, DD, 日 (6 fragments total including year)
+      var _n5 = words[_di5 + 1].text.trim();
+      var _m5 = words[_di5 + 2].text.trim();
+      var _o5 = words[_di5 + 3].text.trim();
+      var _d5 = words[_di5 + 4].text.trim();
+      var _r5 = words[_di5 + 5].text.trim();
+      if (_n5 === '年' && /^\d{1,2}$/.test(_m5) && _o5 === '月' && /^\d{1,2}$/.test(_d5) && _r5 === '日') {
+        result.invoiceDate = _yr5 + '-' +
+          _m5.padStart(2, '0') + '-' +
+          _d5.padStart(2, '0');
+        break;
+      }
+    }
+  }
 
   // --- Buyer/Seller names ---
   // Priority 1: Explicit labels "购买方名称：" / "销售方名称：" (same line)
@@ -1779,14 +1816,27 @@ function _extractByText(fullText, words) {
       var _tcLabelText = _tcLabel.text || _tcLabel.normText;
       var _tcLabelDigits = _tcLabelText.replace(/[^A-Za-z0-9]/g, '');
       var _tcCode = _tcLabelDigits;
+      // 同侧边界: 只收集与标签同侧的词,避免水平排列布局下跨越到另一侧
+      // (购方/销方标签 ny 相同时,左侧标签会一路收集到右侧销方的信用代码数字)
+      var _tcSideBound = _getSideBoundary(words);
+      var _tcIsLeftSide = _determineLabelSide(_tcLabel, words);
       // Collect single-char words on the same line and to the right of the label
       var _tcSameLineWords = words.filter(function(w) {
         if (w === _tcLabel) return false;
         if (Math.abs(w.cy - _tcLabel.cy) > _tcLabel.h * 2.5) return false;
         if (w.x < _tcLabel.x + _tcLabel.w - _tcLabel.h) return false;
+        // 同侧检查: 跳过跨越动态边界的词
+        if (_tcIsLeftSide && w.nx >= _tcSideBound) return false;
+        if (!_tcIsLeftSide && w.nx < _tcSideBound) return false;
         return true;
       });
       _tcSameLineWords.sort(function(a, b) { return a.x - b.x; });
+      // CJK 拆字格式下 y 范围检查可能失效(虚拟标签 h 只代表"统一社会"四字),
+      // 导致收集到整张发票的所有单字。真实信用代码同行词不会超过 25 个,
+      // 超过则说明 y 检查失效,放弃追踪,让 Method 2 文本正则接管
+      if (_tcSameLineWords.length > 25) {
+        _tcSameLineWords = [];
+      }
       for (var _tswi = 0; _tswi < _tcSameLineWords.length; _tswi++) {
         var _tsw = _tcSameLineWords[_tswi];
         var _tswText = _tsw.normText || _tsw.text;
@@ -1830,13 +1880,19 @@ function _extractByText(fullText, words) {
   var codes = [];
   var ccPositions = [];
   if (!result.buyerCreditCode || !result.sellerCreditCode) {
-    var ccRegex = new RegExp(_CC_LABEL_PAT + '[^A-Z0-9]{0,30}([0-9][0-9 ]{14,23}[A-Z]?)', 'gi');
+    // [0-9A-Z\s] 匹配数字、字母和所有空白(包括换行)
+    // CJK拆字格式合并后字母可能夹在数字中间(如9132020013590404XW),
+    // 也要兼容未合并的换行分隔格式(9\n1\n3\n...)
+    // {14,40} 范围容纳 18 位代码 + 最多 22 个换行/空格
+    var ccRegex = new RegExp(_CC_LABEL_PAT + '[^A-Z0-9]{0,30}([0-9][0-9A-Z\\s]{14,40}[A-Z0-9]?)', 'gi');
     var cm;
     while ((cm = ccRegex.exec(text)) !== null) {
       var code = cm[1].replace(/\s+/g, '').toUpperCase();
       // Guard: 18位纯数字也可能是信用代码；非18位纯数字则排除
       var _ccPureDigit2 = /^\d+$/.test(code);
       if (_ccPureDigit2 && code.length !== 18) continue;
+      // 信用代码长度校验: 15位(纳税人识别号短码)或18位(统一社会信用代码)
+      if (code.length !== 15 && code.length !== 18) continue;
       if (codes.indexOf(code) < 0) {
         codes.push(code);
         ccPositions.push(cm.index);
@@ -3534,6 +3590,9 @@ function extractByCoordinates(ocrResult) {
         var _tcLabelText = _tcLabel.text || _tcLabel.normText;
         var _tcLabelDigits = _tcLabelText.replace(/[^A-Za-z0-9]/g, '');
         var _tcCode = _tcLabelDigits; // start with any digits/letters fused into the label
+        // 同侧边界: 只收集与标签同侧的词,避免水平排列布局下跨越到另一侧
+        var _tcSideBound = _getSideBoundary(words);
+        var _tcIsLeftSide = _determineLabelSide(_tcLabel, words);
         // Collect single-char words on the same line and to the right of the label
         var _tcSameLineWords = words.filter(function(w) {
           if (w === _tcLabel) return false;
@@ -3541,10 +3600,19 @@ function extractByCoordinates(ocrResult) {
           if (Math.abs(w.cy - _tcLabel.cy) > _tcLabel.h * 2.5) return false;
           // Must be to the right of or very close to the label
           if (w.x < _tcLabel.x + _tcLabel.w - _tcLabel.h) return false;
+          // 同侧检查: 跳过跨越动态边界的词
+          if (_tcIsLeftSide && w.nx >= _tcSideBound) return false;
+          if (!_tcIsLeftSide && w.nx < _tcSideBound) return false;
           return true;
         });
         // Sort by x position (left to right) and collect single-char alphanumeric words
         _tcSameLineWords.sort(function(a, b) { return a.x - b.x; });
+        // CJK 拆字格式下 y 范围检查可能失效(虚拟标签 h 只代表"统一社会"四字),
+        // 导致收集到整张发票的所有单字。真实信用代码同行词不会超过 25 个,
+        // 超过则说明 y 检查失效,放弃追踪,让后续文本正则接管
+        if (_tcSameLineWords.length > 25) {
+          _tcSameLineWords = [];
+        }
         for (var _tswi = 0; _tswi < _tcSameLineWords.length; _tswi++) {
           var _tsw = _tcSameLineWords[_tswi];
           var _tswText = _tsw.normText || _tsw.text;
@@ -3609,6 +3677,31 @@ function extractByCoordinates(ocrResult) {
       if (/\d{6,}/.test(sccM[1])) lastScc = sccM[1];
     }
     if (lastScc) sellerCreditCode = lastScc.toUpperCase();
+  }
+
+  // CC5: Buyer code from full word concatenation (CJK split-char format)
+  // 买方代码被拆成单字 word 时(如 "9","1","3",...,"X","W"),normText 中的 \n
+  // 破坏了正则连续匹配。_extractSeller 通过拼接右侧区域 word 解决了卖方问题,
+  // 但买方没有对应逻辑。这里拼接全文 word(无分隔符),匹配独立 18 位代码,
+  // 排除已找到的 sellerCreditCode 和 invoiceNo。
+  if (!buyerCreditCode && words && words.length > 0) {
+    var _allWordsText = words.map(function(w) { return w.normText || ''; }).join('');
+    var _buyerCcRe = /\b([0-9][A-Z0-9]{17})\b/g;
+    var _bcm, _buyerCandidates = [];
+    while ((_bcm = _buyerCcRe.exec(_allWordsText)) !== null) {
+      var _bcc = _bcm[1].toUpperCase();
+      // 排除非18位纯数字(更可能是发票号码)
+      if (/^\d+$/.test(_bcc) && _bcc.length !== 18) continue;
+      // 排除发票号码
+      if (invoiceNo && _bcc === invoiceNo.toUpperCase()) continue;
+      if (_buyerCandidates.indexOf(_bcc) < 0) _buyerCandidates.push(_bcc);
+    }
+    // 选择第一个非 seller 的代码作为 buyer
+    for (var _ci = 0; _ci < _buyerCandidates.length; _ci++) {
+      if (sellerCreditCode && _buyerCandidates[_ci] === sellerCreditCode) continue;
+      buyerCreditCode = _buyerCandidates[_ci];
+      break;
+    }
   }
 
   // ========== Cross-validation & sanity checks ==========

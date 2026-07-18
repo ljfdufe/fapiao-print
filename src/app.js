@@ -126,9 +126,27 @@ function createFileObj(opts) {
 // Helpers
 // =====================================================
 var toastT = null;
+// v2.1.1: Toast 防抖,避免批量加载时频繁 innerHTML 写入
+var _toastLoadMsg = '';
+var _toastLoadTimer = null;
+var _toastLoadDirty = false;
 function toast(msg, dur) { dur = dur || 2500; var e = document.getElementById('toast'); e.textContent = msg; e.classList.add('show'); clearTimeout(toastT); if (dur > 0) toastT = setTimeout(function() { e.classList.remove('show'); }, dur); else clearTimeout(toastT); }
 function toastHtml(msg, dur) { dur = dur || 2500; var e = document.getElementById('toast'); e.innerHTML = msg; e.classList.add('show'); clearTimeout(toastT); if (dur > 0) toastT = setTimeout(function() { e.classList.remove('show'); }, dur); else clearTimeout(toastT); }
-function toastLoading(msg) { _ocrToastActive = true; toastHtml('<span class="toast-spinner"></span>' + msg, 0); }
+function toastLoading(msg) {
+  _ocrToastActive = true;
+  _toastLoadMsg = msg;
+  _toastLoadDirty = true;
+  // 防抖: 100ms 内多次调用只更新一次 DOM
+  if (_toastLoadTimer === null) {
+    _toastLoadTimer = setTimeout(function() {
+      _toastLoadTimer = null;
+      if (_toastLoadDirty) {
+        _toastLoadDirty = false;
+        toastHtml('<span class="toast-spinner"></span>' + _toastLoadMsg, 0);
+      }
+    }, 100);
+  }
+}
 function toastDone(msg) { toast(msg, 2500); }
 function hideToast() { var e = document.getElementById('toast'); e.classList.remove('show'); clearTimeout(toastT); }
 function syncSlider(s, n) { document.getElementById(n).value = s.value; }

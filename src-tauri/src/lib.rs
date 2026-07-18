@@ -81,8 +81,10 @@ use pdf_engine::{OcrResult, RenderedOcrPage};
 
 /// Read files from given paths (for drag-and-drop and dialog plugin)
 #[command]
-fn open_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
-    pdf_engine::read_invoice_files(paths)
+async fn open_invoice_files(paths: Vec<String>) -> Result<Vec<FileData>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_engine::read_invoice_files(paths)
+    }).await.map_err(|e| format!("文件读取任务失败: {}", e))?
 }
 
 /// Parse OFD file: returns SVG vector rendering + structured invoice data from XML.
