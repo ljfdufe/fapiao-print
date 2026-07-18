@@ -1,5 +1,48 @@
 # 📋 更新日志
 
+## v2.1.2 — 发票字段提取准确性修复
+
+### 🐛 修复
+
+- **买方信用代码缺失**：CJK 拆字格式下买方代码被拆成单字 word（如 `9132020013590404XW` 拆为 `9132020013590404` + `X` + `W`），normText 中的 `\n` 破坏正则连续匹配。新增 CC5 兜底：拼接全文 word（无分隔符）匹配独立 18 位代码，排除已找到的 seller 和 invoiceNo
+- **Method2 正则不匹配字母**：`[0-9\s]` → `[0-9A-Z\s]`，支持字母夹在数字中间的合并格式；新增 15/18 位长度校验过滤噪声
+- **名称带括号被拆分丢失**：检测到括号紧跟匹配后缀时不再拆分，保留完整名称（如「XXX（分公司）」）
+- **日期为空**：CJK 拆字格式下日期被拆为独立词，新增 Pattern5 匹配连续 6 词「年/MM/月/DD/日」序列并合并为 YYYY-MM-DD
+- **_cleanName 残留日期碎片**：清理 `YYYY年MM月DD日`、`YYYY-MM-DD`、`YYYY/MM/DD` 等格式，避免名称误匹配日期
+- **列表高亮错位**：`syncActiveFileFromPage` 会把 `_activeFileIdx` 强制重置为当前页第一个文件，覆盖用户点击。改为先检查当前 `_activeFileIdx` 是否已在当前页范围内，若是则保持不变
+
+### ⚡ 性能优化
+
+- `open_invoice_files` 异步化（`spawn_blocking`），大批量图片加载不再阻塞 IPC 线程
+- `_creditSrcWordSet` 改用 `Set`，成员检查 O(n) → O(1)
+- Toast 100ms 防抖，批量加载时减少 DOM 重绘
+- `extract_pdf_texts` 单页失败容错，不再因 1 页损坏触发 99 次串行回退
+- 移除调试日志
+
+---
+
+## v2.1.1 — 修复购销方识别错位
+
+### 🐛 修复
+
+- **表头锚点法**：用「购买方」/「销售方」表头词的 x 坐标作为区域锚点，替代固定 0.5 边界判定，解决扫描偏移/发票宽度差异导致的左右半误判
+- **CJK 拆字兜底**：dzcp/iloveofd 格式下「购+买+方」/「销+售+方」单字序列合成虚拟表头
+- **动态边界**：词收集过滤器和信用代码分类使用表头中点作为边界（无表头时 fallback 到 0.5），保持 label 分类与 word 过滤一致
+- **交叉验证纠错**：
+  - 同名检测（buyerName === sellerName → 清空 sellerName 触发重试）
+  - 位置反推（sellerName 的 x < buyerName 的 x 且差距 > 15% → 交换）
+  - 信用代码位置反推（同理）
+  - 信用代码锚点纠错（sellerCreditCode 同侧的 buyerName 实为销售方）
+- **性能优化**：表头检测按 words 数组引用缓存，避免紧密循环中重复扫描
+
+### 📊 影响范围
+
+- `src/ocr.js`：新增 `_determineLabelSide` / `_getSideBoundary` / `_crossValidateBuyerSeller` 三个函数
+- 所有固定 0.5 边界判定（label 分类、词收集、信用代码分类）统一改为动态边界
+- `_extractSeller` 兜底函数的 0.45 宽松阈值保持不变（兜底场景需要更宽容）
+
+---
+
 ## v2.1.0 — 版本号显示 + 检查更新功能
 
 ### 🔄 检查更新（GitHub Release）

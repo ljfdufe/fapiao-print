@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-- **版本**: v2.1.0
+- **版本**: v2.1.2
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架）
 - **前端**: `src/{index.html, styles.css, ocr.js, layout.js, print.js, app.js}`
 - **后端**: `src-tauri/src/{main.rs, lib.rs, pdf_engine.rs, pdfium_print.rs}`
@@ -74,6 +74,34 @@ npm run bump <版本号>    # 同步版本号到 Cargo.toml + tauri.conf.json
 - **金额三阶段**: 含税价 → 数学验证配对 → 区域解析
 - **中文大写兜底**: `parseChineseNumeral()` — 阿拉伯金额因字体/编码丢失时的 fallback
 - **OCR 跳过条件**: `_pdfTextExtracted && sellerName && amountTax > 0`
+
+### 购销方识别优化 (v2.1.1)
+
+修复偶发的「购买方识别为销售方」问题，采用表头锚点 + 交叉验证双保险。
+
+- **表头锚点法** `_determineLabelSide(label, words)`：用「购买方」/「销售方」表头词的 x 坐标作为区域锚点，替代固定 0.5 边界
+  - 支持融合词（"购买方"）和 CJK 拆字序列（购+买+方）两种检测方式
+  - 双表头：label 归属距离更近的一侧；单表头：以表头 ±0.15 为判定区间；无表头：fallback 到 0.5
+- **动态边界** `_getSideBoundary(words)`：双表头中点 / 单表头 ±0.25 / 无表头 0.5
+  - 词收集过滤器和信用代码分类统一使用动态边界，保持与 label 分类一致
+- **性能缓存** `_headerCache`：按 words 数组引用缓存表头位置，避免紧密循环（信用代码排除、词收集）中重复 O(n) 扫描
+- **交叉验证** `_crossValidateBuyerSeller(result, words)`：在 `_extractByText` return 前执行
+  - Rule 1：buyerName === sellerName → 清空 sellerName（同名几乎必为识别错误）
+  - Rule 2：sellerName.nx < buyerName.nx - 0.15 → 交换（位置反了）
+  - Rule 3：sellerCreditCode.nx < buyerCreditCode.nx - 0.15 → 交换
+  - Rule 4：sellerCreditCode 同侧的 buyerName 实为销售方 → 迁移
+- **影响范围**：`_extractNamesByCoords` / `_extractByText` / `extractByCoordinates` 中所有固定 0.5 边界判定统一改为动态边界；`_extractSeller` 兜底函数的 0.45 宽松阈值保持不变
+
+### 字段提取准确性修复 (v2.1.2)
+
+针对 CJK 拆字格式（dzcp/iloveofd）下的字段提取问题，新增多个兜底策略。
+
+- **信用代码 CC5 兜底**：买方代码被拆成单字 word 时（`9132020013590404` + `X` + `W`），normText 的 `\n` 破坏正则连续匹配。拼接全文 word（无分隔符）匹配独立 18 位代码，排除已找到的 seller 和 invoiceNo
+- **Method2 正则优化**：`[0-9\s]` → `[0-9A-Z\s]` 支持字母夹在数字中间的合并格式；新增 15/18 位长度校验
+- **名称括号保留**：检测到括号紧跟匹配后缀时不拆分，保留「XXX（分公司）」完整结构
+- **CJK 拆字日期合并**：Pattern5 匹配连续 6 词「年/MM/月/DD/日」序列，合并为 YYYY-MM-DD
+- **_cleanName 日期清理**：清理 `YYYY年MM月DD日`、`YYYY-MM-DD`、`YYYY/MM/DD` 等格式碎片
+- **列表高亮修复**：`syncActiveFileFromPage` 改为先检查 `_activeFileIdx` 是否在当前页范围内，避免覆盖用户点击
 
 ### XML 数电票解析 (v2.0.7+)
 

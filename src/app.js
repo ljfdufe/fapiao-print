@@ -126,9 +126,27 @@ function createFileObj(opts) {
 // Helpers
 // =====================================================
 var toastT = null;
+// v2.1.1: Toast 防抖,避免批量加载时频繁 innerHTML 写入
+var _toastLoadMsg = '';
+var _toastLoadTimer = null;
+var _toastLoadDirty = false;
 function toast(msg, dur) { dur = dur || 2500; var e = document.getElementById('toast'); e.textContent = msg; e.classList.add('show'); clearTimeout(toastT); if (dur > 0) toastT = setTimeout(function() { e.classList.remove('show'); }, dur); else clearTimeout(toastT); }
 function toastHtml(msg, dur) { dur = dur || 2500; var e = document.getElementById('toast'); e.innerHTML = msg; e.classList.add('show'); clearTimeout(toastT); if (dur > 0) toastT = setTimeout(function() { e.classList.remove('show'); }, dur); else clearTimeout(toastT); }
-function toastLoading(msg) { _ocrToastActive = true; toastHtml('<span class="toast-spinner"></span>' + msg, 0); }
+function toastLoading(msg) {
+  _ocrToastActive = true;
+  _toastLoadMsg = msg;
+  _toastLoadDirty = true;
+  // 防抖: 100ms 内多次调用只更新一次 DOM
+  if (_toastLoadTimer === null) {
+    _toastLoadTimer = setTimeout(function() {
+      _toastLoadTimer = null;
+      if (_toastLoadDirty) {
+        _toastLoadDirty = false;
+        toastHtml('<span class="toast-spinner"></span>' + _toastLoadMsg, 0);
+      }
+    }, 100);
+  }
+}
 function toastDone(msg) { toast(msg, 2500); }
 function hideToast() { var e = document.getElementById('toast'); e.classList.remove('show'); clearTimeout(toastT); }
 function syncSlider(s, n) { document.getElementById(n).value = s.value; }
@@ -1684,6 +1702,14 @@ function syncActiveFileFromPage() {
   var perPage = S.layout.cols * S.layout.rows;
   var pageStart = S.currentPage * perPage;
   if (pageStart < activeFiles.length) {
+    // 若当前 _activeFileIdx 已在当前页范围内,保持不变(用户点击列表项时不应被覆盖)
+    if (_activeFileIdx >= 0) {
+      var curFile = S.files[_activeFileIdx];
+      var curActiveIdx = activeFiles.indexOf(curFile);
+      if (curActiveIdx >= pageStart && curActiveIdx < pageStart + perPage) {
+        return;
+      }
+    }
     var firstFileOnPage = activeFiles[pageStart];
     var newIdx = S.files.indexOf(firstFileOnPage);
     if (newIdx !== _activeFileIdx) {
@@ -2663,7 +2689,7 @@ function resetSettings() {
   document.getElementById('footerMarginRow').style.display = 'none';
   document.getElementById('footerMargin').value = 8; document.getElementById('footerMarginN').value = 8;
   document.getElementById('ocrPrecision').value = 'standard';
-  document.getElementById('printMode').value = 'pdf';
+  document.getElementById('printMode').value = 'pdfium';
   document.getElementById('themeMode').value = 'light';
   document.documentElement.classList.remove('dark');
   try { localStorage.removeItem('ticketchan-theme'); } catch(e) {}
@@ -2673,6 +2699,7 @@ function resetSettings() {
   try { localStorage.removeItem('ticketchan-ocr-precision'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-pdf-text-enabled'); } catch(e) {}
   try { localStorage.removeItem('ticketchan-settings'); } catch(e) {}
+  try { localStorage.removeItem('ticketchan-print-mode'); } catch(e) {}
   _renameTemplate = ['amountTax', 'sellerName', 'invoiceNo'];
   _renameSeparator = '_';
   _summaryActiveCols = [];
@@ -2876,7 +2903,8 @@ document.getElementById('orientation').value = 'landscape';
     if (pm && (pm === 'confirm' || pm === 'direct' || pm === 'pdfium' || pm === 'pdf')) {
       document.getElementById('printMode').value = pm;
     } else {
-      document.getElementById('printMode').value = 'pdf';
+      // 默认 PDFium 静默打印 — PDF 阅读器模式无法可靠切换打印机(Edge/Chrome 内置查看器不支持 printto)
+      document.getElementById('printMode').value = 'pdfium';
     }
   } catch(e) {}
 })();
