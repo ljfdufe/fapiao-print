@@ -19,6 +19,10 @@
 - `extract_pdf_texts` 单页失败容错，不再因 1 页损坏触发 99 次串行回退
 - 移除调试日志
 
+### 🌐 更新检查
+
+- **主备双源**：`check_for_updates` 先尝试直连 `api.github.com`，失败后 fallback 到 `gh-proxy.com` 加速代理，保证大陆网络环境下更新检查可用
+
 ---
 
 ## v2.1.1 — 修复购销方识别错位

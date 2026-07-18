@@ -429,6 +429,9 @@ fn compare_versions(a: &str, b: &str) -> i32 {
 /// Check for updates by querying GitHub Releases API (latest release).
 /// Returns update info including latest version, release notes, and download assets.
 /// Uses async reqwest to avoid blocking the IPC thread.
+///
+/// 主备双源: 先尝试直连 api.github.com,失败后 fallback 到 gh-proxy.com 加速代理。
+/// 保证大陆网络环境下更新检查可用,网络通畅时直连最快。
 #[command]
 async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -438,22 +441,34 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
         .build()
         .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
 
-    let resp = client
-        .get("https://api.github.com/repos/erma0/fapiao-print/releases/latest")
-        .header("User-Agent", "ticketchan-updater")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("请求GitHub失败: {}", e))?;
+    // 主备双源: 直连 → gh-proxy.com 代理
+    let urls = [
+        "https://api.github.com/repos/erma0/fapiao-print/releases/latest",
+        "https://gh-proxy.com/https://api.github.com/repos/erma0/fapiao-print/releases/latest",
+    ];
 
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API返回状态: {}", resp.status()));
+    let mut body: Option<String> = None;
+    let mut last_err = String::new();
+    for url in &urls {
+        match client
+            .get(*url)
+            .header("User-Agent", "ticketchan-updater")
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.text().await {
+                    Ok(text) => { body = Some(text); break; }
+                    Err(e) => last_err = format!("读取响应失败: {}", e),
+                }
+            }
+            Ok(resp) => last_err = format!("API返回状态: {}", resp.status()),
+            Err(e) => last_err = format!("请求失败: {}", e),
+        }
     }
+    let body = body.ok_or_else(|| format!("GitHub更新检查失败: {}", last_err))?;
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| format!("解析响应失败: {}", e))?;
 
